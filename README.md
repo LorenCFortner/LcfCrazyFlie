@@ -1,2 +1,2 @@
-# WindowMan
-WindowMan helps manage windows desktop area.  The Desktop is the total Area and is divided up into Subdivisions and further divided into Lots.
+# LcfCrazyFlie
+I'm taking the CrazyFlie drone and controling it through Python to navigate autonomously.  Should be fun. 

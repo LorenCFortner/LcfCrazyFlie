@@ -1,3 +1,4 @@
+import queue
 from CustomLib.LedRingHelper import *
 from CustomLib.MotionCommanderHelper import *
 
@@ -8,6 +9,7 @@ from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.positioning.motion_commander import MotionCommander
 
 URI = 'radio://0/1/250K'
+motionCommanderQueue = queue.Queue()
 
 # Only output errors from the logging framework
 logging.basicConfig(level=logging.ERROR)
@@ -35,7 +37,6 @@ if __name__ == '__main__':
         setPreFlight(scf)
         with MotionCommander(scf) as mc:
             takeOffLandTest(mc)
-
             
             print("\nCalling: goOutAndComeBackAlongSamePath()")
             
@@ -46,6 +47,7 @@ if __name__ == '__main__':
                                           "forward(3.0, velocity=1.0)",
                                           scf,
                                           mc,
-                                          1)
+                                          1,
+                                          motionCommanderQueue)
 
         setBeforeLandingFlight(scf)

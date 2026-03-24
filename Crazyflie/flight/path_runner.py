@@ -100,7 +100,7 @@ class PathRunner:
             self._execute(mc, step.command, step.distance_m, step.velocity, step.settle_s)
 
         # 180° pivot to face home
-        mc.turn_right(180, velocity=_PIVOT_RATE_DEG_PER_S)
+        mc.turn_right(180, rate=_PIVOT_RATE_DEG_PER_S)
 
         # Return leg — reversed order, lateral/rotational commands swapped
         for step in reversed(self._steps):
@@ -128,5 +128,8 @@ class PathRunner:
         velocity: float,
         settle_s: float,
     ) -> None:
-        getattr(mc, command)(distance_m, velocity=velocity)
+        if command in ("turn_left", "turn_right"):
+            getattr(mc, command)(distance_m, rate=velocity)
+        else:
+            getattr(mc, command)(distance_m, velocity=velocity)
         time.sleep(settle_s)

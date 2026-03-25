@@ -10,6 +10,7 @@ Post-flight: LED ring off.
 
 import logging
 import queue
+import time
 
 import cflib.crtp
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
@@ -126,6 +127,8 @@ def main() -> None:
         try:
             with MotionCommander(scf) as mc:
                 collision_monitor.attach_motion_commander(mc)
+                print("Airborne — stabilizing for 3 seconds...")
+                time.sleep(3.0)
                 print("Flying out 1 metre and back...")
                 runner.run_out_and_back(mc, should_abort=collision_monitor.is_triggered)
                 collision_monitor.detach_motion_commander()

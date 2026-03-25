@@ -134,6 +134,8 @@ def main() -> None:
         try:
             with MotionCommander(scf) as mc:
                 collision_monitor.attach_motion_commander(mc)
+                print("Airborne — stabilizing for 3 seconds...")
+                time.sleep(3.0)
                 print("Starting outbound leg...")
                 runner.run_out_and_back(mc, should_abort=collision_monitor.is_triggered)
                 collision_monitor.detach_motion_commander()

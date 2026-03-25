@@ -1,11 +1,12 @@
 """Collision monitor for Crazyflie 2.0.
 
-Monitors the Multi-ranger deck for obstacles and triggers an emergency
-stop when anything comes within a configurable minimum distance.
+Monitors the Multi-ranger deck for obstacles and triggers an avoidance
+maneuver when anything comes within a configurable minimum distance.
 
 On collision:
   1. Calls mc.stop() immediately so physical movement ceases.
-  2. Posts "COLLISION" to the event queue so the script can land.
+  2. Moves the drone away from the obstacle by _AVOID_DISTANCE_M.
+  3. Posts "COLLISION" to the event queue so the script can land.
 
 The monitor only fires once per flight — set a new CollisionMonitor
 (or call reset()) for each new flight.
@@ -29,10 +30,42 @@ from typing import Optional
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.positioning.motion_commander import MotionCommander
 
-from Crazyflie.decks.multi_ranger import MultiRangerDeck
+from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
 
 DEFAULT_MIN_DISTANCE_M: float = 0.1
 _POLL_INTERVAL_S: float = 0.05  # 20 Hz
+_AVOID_DISTANCE_M: float = 0.2  # how far to back away from the obstacle
+_AVOID_VELOCITY: float = 0.3    # m/s during avoidance move
+
+
+def find_avoidance_move(
+    readings: MultiRangerReadings,
+    min_distance_m: float,
+) -> Optional[str]:
+    """Return the MotionCommander method to move away from the nearest obstacle.
+
+    Checks sensors in priority order (front, back, left, right, up) and returns
+    the opposite direction for the first sensor closer than min_distance_m.
+
+    Args:
+        readings: Current MultiRangerReadings snapshot.
+        min_distance_m: Trigger threshold in metres.
+
+    Returns:
+        MotionCommander method name ('back', 'forward', 'right', 'left', 'down'),
+        or None if no sensor is below the threshold.
+    """
+    checks = [
+        (readings.front, "back"),
+        (readings.back,  "forward"),
+        (readings.left,  "right"),
+        (readings.right, "left"),
+        (readings.up,    "down"),
+    ]
+    for value, direction in checks:
+        if value is not None and 0.0 < value < min_distance_m:
+            return direction
+    return None
 
 
 class CollisionMonitor:
@@ -112,19 +145,29 @@ class CollisionMonitor:
     def _trigger(self, ranger: MultiRangerDeck) -> None:
         """Fire the collision response if not already triggered.
 
+        Stops the drone, moves it away from the obstacle, then posts
+        "COLLISION" to the event queue so the script can land.
+
         Separated from _run() so it can be exercised in unit tests
         without starting a real background thread.
 
         Args:
-            ranger: Active MultiRangerDeck (used only for the obstacle check).
+            ranger: Active MultiRangerDeck used to read which sensor fired.
         """
         if self._triggered:
             return
         self._triggered = True
-        self._event_queue.put("COLLISION")
         with self._lock:
             if self._mc is not None:
                 self._mc.stop()
+                direction = find_avoidance_move(
+                    ranger.get_readings(), self._min_distance_m
+                )
+                if direction is not None:
+                    getattr(self._mc, direction)(
+                        _AVOID_DISTANCE_M, velocity=_AVOID_VELOCITY
+                    )
+        self._event_queue.put("COLLISION")
 
     def _run_once(self) -> None:
         """Perform a single poll cycle against an open MultiRangerDeck.

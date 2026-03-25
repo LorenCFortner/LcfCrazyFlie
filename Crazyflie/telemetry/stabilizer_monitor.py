@@ -25,7 +25,7 @@ from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.crazyflie.syncLogger import SyncLogger
 
 
-MIN_BATTERY_VOLTAGE_V = 3.7
+MIN_BATTERY_VOLTAGE_V = 3.5
 MAX_ROLL_DEG = 20.0
 MAX_PITCH_DEG = 20.0
 MS_BETWEEN_UPDATES = 100

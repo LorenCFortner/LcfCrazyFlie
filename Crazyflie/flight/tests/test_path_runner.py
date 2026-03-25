@@ -302,3 +302,83 @@ class TestRunOutAndBack:
         assert len(calls) == 1
         assert calls[0][0] == "turn_right"
         assert calls[0][1][0] == 180
+
+
+# ---------------------------------------------------------------------------
+# should_abort — early exit when callable returns True
+# ---------------------------------------------------------------------------
+
+class TestShouldAbort:
+    def test_run_stops_before_first_step_when_abort_true(self, mock_mc):
+        PathRunner([FlightStep("forward", 1.0, settle_s=0.0)]).run(
+            mock_mc, should_abort=lambda: True
+        )
+
+        mock_mc.forward.assert_not_called()
+
+    def test_run_executes_first_step_when_abort_false(self, mock_mc):
+        PathRunner([FlightStep("forward", 1.0, settle_s=0.0)]).run(
+            mock_mc, should_abort=lambda: False
+        )
+
+        mock_mc.forward.assert_called_once()
+
+    def test_run_stops_mid_path_when_abort_becomes_true(self, mock_mc):
+        call_count = [0]
+
+        def abort_after_one():
+            call_count[0] += 1
+            return call_count[0] > 1
+
+        PathRunner([
+            FlightStep("forward", 1.0, settle_s=0.0),
+            FlightStep("left",    0.5, settle_s=0.0),
+        ]).run(mock_mc, should_abort=abort_after_one)
+
+        mock_mc.forward.assert_called_once()
+        mock_mc.left.assert_not_called()
+
+    def test_run_out_and_back_stops_before_pivot_when_aborted(self, mock_mc):
+        PathRunner([FlightStep("forward", 1.0, settle_s=0.0)]).run_out_and_back(
+            mock_mc, should_abort=lambda: True
+        )
+
+        turn_calls = [c for c in mock_mc.method_calls if c[0] == "turn_right"]
+        assert len(turn_calls) == 0
+
+    def test_run_out_and_back_stops_on_return_leg_when_aborted(self, mock_mc):
+        outbound_done = [False]
+
+        def abort_after_outbound():
+            return outbound_done[0]
+
+        original_forward = mock_mc.forward.side_effect
+
+        def mark_outbound(*args, **kwargs):
+            outbound_done[0] = True
+
+        mock_mc.forward.side_effect = mark_outbound
+
+        PathRunner([FlightStep("forward", 1.0, settle_s=0.0)]).run_out_and_back(
+            mock_mc, should_abort=abort_after_outbound
+        )
+
+        # Outbound forward ran, but the pivot and return leg were skipped
+        forward_calls = [c for c in mock_mc.method_calls if c[0] == "forward"]
+        assert len(forward_calls) == 1
+
+    def test_run_reversed_stops_before_first_step_when_abort_true(self, mock_mc):
+        PathRunner([FlightStep("forward", 1.0, settle_s=0.0)]).run_reversed(
+            mock_mc, should_abort=lambda: True
+        )
+
+        mock_mc.back.assert_not_called()
+
+    def test_run_without_should_abort_runs_normally(self, mock_mc):
+        PathRunner([
+            FlightStep("forward", 1.0, settle_s=0.0),
+            FlightStep("left",    0.5, settle_s=0.0),
+        ]).run(mock_mc)
+
+        mock_mc.forward.assert_called_once()
+        mock_mc.left.assert_called_once()

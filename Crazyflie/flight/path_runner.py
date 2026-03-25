@@ -6,6 +6,7 @@ same path with all directions automatically inverted.
 
 import time
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 from cflib.positioning.motion_commander import MotionCommander
 
@@ -76,16 +77,28 @@ class PathRunner:
         """
         self._steps = steps
 
-    def run(self, mc: MotionCommander) -> None:
+    def run(
+        self,
+        mc: MotionCommander,
+        should_abort: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """Execute the path in order.
 
         Args:
             mc: Active MotionCommander instance.
+            should_abort: Optional callable checked before each step.
+                          Return True to stop execution early (e.g. collision).
         """
         for step in self._steps:
+            if should_abort and should_abort():
+                return
             self._execute(mc, step.command, step.distance_m, step.velocity, step.settle_s)
 
-    def run_out_and_back(self, mc: MotionCommander) -> None:
+    def run_out_and_back(
+        self,
+        mc: MotionCommander,
+        should_abort: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """Execute the path outbound, pivot 180°, then retrace back home.
 
         The return leg runs steps in reverse order with left↔right and
@@ -94,20 +107,33 @@ class PathRunner:
 
         Args:
             mc: Active MotionCommander instance.
+            should_abort: Optional callable checked before each step.
+                          Return True to stop execution early (e.g. collision).
         """
         # Outbound leg
         for step in self._steps:
+            if should_abort and should_abort():
+                return
             self._execute(mc, step.command, step.distance_m, step.velocity, step.settle_s)
+
+        if should_abort and should_abort():
+            return
 
         # 180° pivot to face home
         mc.turn_right(180, rate=_PIVOT_RATE_DEG_PER_S)
 
         # Return leg — reversed order, lateral/rotational commands swapped
         for step in reversed(self._steps):
+            if should_abort and should_abort():
+                return
             inverted_command = _TURN_AROUND_INVERSION.get(step.command, step.command)
             self._execute(mc, inverted_command, step.distance_m, step.velocity, step.settle_s)
 
-    def run_reversed(self, mc: MotionCommander) -> None:
+    def run_reversed(
+        self,
+        mc: MotionCommander,
+        should_abort: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """Execute the path in reverse to return home.
 
         Steps run in reverse order and each direction is inverted:
@@ -115,8 +141,12 @@ class PathRunner:
 
         Args:
             mc: Active MotionCommander instance.
+            should_abort: Optional callable checked before each step.
+                          Return True to stop execution early (e.g. collision).
         """
         for step in reversed(self._steps):
+            if should_abort and should_abort():
+                return
             inverted_command = _REVERSE_DIRECTION.get(step.command, step.command)
             self._execute(mc, inverted_command, step.distance_m, step.velocity, step.settle_s)
 

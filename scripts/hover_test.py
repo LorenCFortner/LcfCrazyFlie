@@ -91,8 +91,8 @@ def main() -> None:
     with SyncCrazyflie(URI) as scf:
         pre_flight(scf)
 
-        monitor = StabilizerMonitor(scf, event_queue)
-        monitor.start()
+        stabilizer_monitor = StabilizerMonitor(scf, event_queue)
+        stabilizer_monitor.start()
 
         try:
             with MotionCommander(scf) as mc:
@@ -100,7 +100,7 @@ def main() -> None:
 
                 start_time = time.time()
                 while time.time() - start_time < HOVER_DURATION_S:
-                    if handle_safety_events(event_queue, mc, scf, monitor):
+                    if handle_safety_events(event_queue, mc, scf, stabilizer_monitor):
                         break
                     time.sleep(0.1)
 
@@ -109,7 +109,7 @@ def main() -> None:
         except Exception as exc:
             print(f"Flight error: {exc}")
         finally:
-            monitor.stop()
+            stabilizer_monitor.stop()
             post_flight(scf)
 
 

@@ -192,3 +192,22 @@ class TestStabilizerMonitorLifecycle:
         monitor.stop()
 
         assert monitor._stop_requested is True
+
+
+class TestIsTriggered:
+    def test_is_false_initially(self, mock_scf, mock_queue):
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+
+        assert monitor.is_triggered() is False
+
+    def test_is_true_when_triggered_flag_set(self, mock_scf, mock_queue):
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+        monitor._triggered = True
+
+        assert monitor.is_triggered() is True
+
+    def test_remains_false_when_no_safety_event(self, mock_scf, mock_queue):
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+        monitor._triggered = False
+
+        assert monitor.is_triggered() is False

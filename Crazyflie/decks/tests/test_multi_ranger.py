@@ -70,7 +70,7 @@ class TestDirectionProperties:
         assert getattr(deck, direction) == pytest.approx(1.23)
 
     @pytest.mark.parametrize("direction", ["front", "back", "left", "right", "up"])
-    def test_direction_returns_none_when_no_reading(self, ranger, direction):
+    def test_direction_returns_none_when_nothing_within_range(self, ranger, direction):
         deck, mock_mr = ranger
         setattr(mock_mr, direction, None)
 

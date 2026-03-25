@@ -113,7 +113,11 @@ def main() -> None:
             with MotionCommander(scf) as mc:
                 collision_monitor.attach_motion_commander(mc)
                 print("Airborne — stabilizing for 3 seconds...")
-                time.sleep(3.0)
+                for i in range(3):
+                    time.sleep(1.0)
+                    height_cm = stabilizer_monitor.state.height_mm / 10.0
+                    batt = stabilizer_monitor.state.battery_v
+                    print(f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V")
                 print(f"Hovering for {HOVER_DURATION_S:.0f} seconds...")
 
                 start_time = time.time()

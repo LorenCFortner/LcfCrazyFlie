@@ -171,6 +171,18 @@ class StabilizerMonitor:
         self._ms_between_updates = ms_between_updates
         self.state = DroneState()
         self._stop_requested = False
+        self._triggered = False
+
+    def is_triggered(self) -> bool:
+        """Return True if a CRASH or BATLOW event has been posted.
+
+        Pass this as part of the should_abort callable to PathRunner so path
+        execution stops at the next step boundary after a safety event.
+
+        Returns:
+            True if a safety event was detected, False otherwise.
+        """
+        return self._triggered
 
     def start(self) -> None:
         """Start telemetry collection in a background thread."""
@@ -199,6 +211,9 @@ class StabilizerMonitor:
 
                 data = log_entry[1]
                 update_state_from_log(self.state, data)
-                check_roll(self.state, self._max_roll_deg, self._event_queue)
-                check_pitch(self.state, self._max_pitch_deg, self._event_queue)
-                check_battery(self.state, self._min_battery_v, self._event_queue)
+                if (
+                    check_roll(self.state, self._max_roll_deg, self._event_queue)
+                    or check_pitch(self.state, self._max_pitch_deg, self._event_queue)
+                    or check_battery(self.state, self._min_battery_v, self._event_queue)
+                ):
+                    self._triggered = True

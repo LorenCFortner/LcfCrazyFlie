@@ -135,9 +135,19 @@ def main() -> None:
             with MotionCommander(scf) as mc:
                 collision_monitor.attach_motion_commander(mc)
                 print("Airborne — stabilizing for 3 seconds...")
-                time.sleep(3.0)
+                for i in range(3):
+                    time.sleep(1.0)
+                    height_cm = stabilizer_monitor.state.height_mm / 10.0
+                    batt = stabilizer_monitor.state.battery_v
+                    print(f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V")
                 print("Starting outbound leg...")
-                runner.run_out_and_back(mc, should_abort=collision_monitor.is_triggered)
+                runner.run_out_and_back(
+                    mc,
+                    should_abort=lambda: (
+                        collision_monitor.is_triggered()
+                        or stabilizer_monitor.is_triggered()
+                    ),
+                )
                 collision_monitor.detach_motion_commander()
 
                 # Drain remaining safety events before landing.
@@ -150,6 +160,7 @@ def main() -> None:
         except Exception as exc:
             print(f"Flight error: {exc}")
         finally:
+            collision_monitor.detach_motion_commander()
             collision_monitor.stop()
             stabilizer_monitor.stop()
             post_flight(scf)

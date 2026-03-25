@@ -3,8 +3,8 @@
 Wraps cflib.utils.multiranger.Multiranger to provide distance readings
 in all five directions: front, back, left, right, up.
 
-Distances are in metres with mm precision, up to 4 m.
-A reading of None means the sensor returned no valid measurement.
+Distances are in metres with mm precision, up to 8 m.
+A reading of None means nothing is within sensor range (≥ 8 m) — not a fault.
 
 Requires both a Multi-ranger deck and a Flow deck to be fitted.
 
@@ -22,7 +22,7 @@ from typing import Optional
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.utils.multiranger import Multiranger
 
-MAX_RANGE_M: float = 4.0  # sensor maximum range in metres
+MAX_RANGE_M: float = 8.0  # sensor maximum range in metres; None returned beyond this
 
 
 @dataclass
@@ -30,11 +30,11 @@ class MultiRangerReadings:
     """Snapshot of all five Multi-ranger distance readings.
 
     Attributes:
-        front: Distance ahead in metres, or None if no reading.
-        back: Distance behind in metres, or None if no reading.
-        left: Distance to the left in metres, or None if no reading.
-        right: Distance to the right in metres, or None if no reading.
-        up: Distance above in metres, or None if no reading.
+        front: Distance ahead in metres, or None if nothing within 8 m.
+        back: Distance behind in metres, or None if nothing within 8 m.
+        left: Distance to the left in metres, or None if nothing within 8 m.
+        right: Distance to the right in metres, or None if nothing within 8 m.
+        up: Distance above in metres, or None if nothing within 8 m.
     """
     front: Optional[float]
     back: Optional[float]
@@ -77,27 +77,27 @@ class MultiRangerDeck:
 
     @property
     def front(self) -> Optional[float]:
-        """Distance ahead in metres, or None if no reading."""
+        """Distance ahead in metres, or None if nothing within 8 m."""
         return self._multiranger.front if self._multiranger else None
 
     @property
     def back(self) -> Optional[float]:
-        """Distance behind in metres, or None if no reading."""
+        """Distance behind in metres, or None if nothing within 8 m."""
         return self._multiranger.back if self._multiranger else None
 
     @property
     def left(self) -> Optional[float]:
-        """Distance to the left in metres, or None if no reading."""
+        """Distance to the left in metres, or None if nothing within 8 m."""
         return self._multiranger.left if self._multiranger else None
 
     @property
     def right(self) -> Optional[float]:
-        """Distance to the right in metres, or None if no reading."""
+        """Distance to the right in metres, or None if nothing within 8 m."""
         return self._multiranger.right if self._multiranger else None
 
     @property
     def up(self) -> Optional[float]:
-        """Distance above in metres, or None if no reading."""
+        """Distance above in metres, or None if nothing within 8 m."""
         return self._multiranger.up if self._multiranger else None
 
     def get_readings(self) -> MultiRangerReadings:

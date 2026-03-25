@@ -95,7 +95,7 @@ def handle_safety_events(
         print("Low battery — landing now.")
         land_on_low_battery(mc)
     elif event == "COLLISION":
-        print("Obstacle detected — landing now.")
+        print("Obstacle detected — avoidance complete, landing now.")
         land_immediately(mc)
     else:
         print(f"Unknown event '{event}' — landing immediately as precaution.")
@@ -115,7 +115,9 @@ def main() -> None:
     event_queue: queue.Queue = queue.Queue()
     runner = PathRunner(OUT_AND_BACK_PATH)
 
+    print(f"Connecting to {URI}...")
     with SyncCrazyflie(URI) as scf:
+        print("Connected.")
         pre_flight(scf)
 
         stabilizer_monitor = StabilizerMonitor(scf, event_queue)
@@ -124,13 +126,29 @@ def main() -> None:
         collision_monitor = CollisionMonitor(scf, event_queue)
         collision_monitor.start()
 
+        # Give the monitor one poll cycle to read initial telemetry.
+        time.sleep(0.15)
+        print(f"Battery: {stabilizer_monitor.state.battery_v:.2f} V")
+
+        flight_start = time.time()
+
         try:
             with MotionCommander(scf) as mc:
                 collision_monitor.attach_motion_commander(mc)
                 print("Airborne — stabilizing for 3 seconds...")
-                time.sleep(3.0)
+                for i in range(3):
+                    time.sleep(1.0)
+                    height_cm = stabilizer_monitor.state.height_mm / 10.0
+                    batt = stabilizer_monitor.state.battery_v
+                    print(f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V")
                 print("Flying out 1 metre and back...")
-                runner.run_out_and_back(mc, should_abort=collision_monitor.is_triggered)
+                runner.run_out_and_back(
+                    mc,
+                    should_abort=lambda: (
+                        collision_monitor.is_triggered()
+                        or stabilizer_monitor.is_triggered()
+                    ),
+                )
                 collision_monitor.detach_motion_commander()
 
                 # Drain remaining safety events before landing.
@@ -143,9 +161,12 @@ def main() -> None:
         except Exception as exc:
             print(f"Flight error: {exc}")
         finally:
+            collision_monitor.detach_motion_commander()
             collision_monitor.stop()
+            flight_time = time.time() - flight_start
             stabilizer_monitor.stop()
             post_flight(scf)
+            print(f"Total flight time: {flight_time:.1f} s")
 
 
 if __name__ == "__main__":

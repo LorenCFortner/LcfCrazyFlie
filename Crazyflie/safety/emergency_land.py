@@ -33,10 +33,11 @@ def land_immediately(mc: MotionCommander) -> None:
 def land_on_low_battery(mc: MotionCommander) -> None:
     """Land gently when battery is low.
 
-    Uses MotionCommander.land() because the drone is still stable —
-    only the battery is the concern.
+    Stops horizontal movement first, then uses MotionCommander.land()
+    because the drone is still stable — only the battery is the concern.
 
     Args:
         mc: Active MotionCommander instance.
     """
+    mc.stop()
     mc.land()

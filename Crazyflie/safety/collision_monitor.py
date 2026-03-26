@@ -167,19 +167,21 @@ class CollisionMonitor:
         Args:
             ranger: Active MultiRangerDeck used to read which sensor fired.
         """
-        if self._triggered:
-            return
-        self._triggered = True
         with self._lock:
-            if self._mc is not None:
-                self._mc.stop()
-                direction = find_avoidance_move(
-                    ranger.get_readings(), self._min_distance_m
+            if self._triggered:
+                return
+            self._triggered = True
+            mc = self._mc
+
+        if mc is not None:
+            mc.stop()
+            direction = find_avoidance_move(
+                ranger.get_readings(), self._min_distance_m
+            )
+            if direction is not None:
+                getattr(mc, direction)(
+                    _AVOID_DISTANCE_M, velocity=_AVOID_VELOCITY
                 )
-                if direction is not None:
-                    getattr(self._mc, direction)(
-                        _AVOID_DISTANCE_M, velocity=_AVOID_VELOCITY
-                    )
         self._event_queue.put("COLLISION")
 
     def _run_once(self) -> None:

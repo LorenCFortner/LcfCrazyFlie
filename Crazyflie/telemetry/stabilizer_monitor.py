@@ -172,6 +172,7 @@ class StabilizerMonitor:
         self.state = DroneState()
         self._stop_requested = False
         self._triggered = False
+        self._thread: Optional[threading.Thread] = None
 
     def is_triggered(self) -> bool:
         """Return True if a CRASH or BATLOW event has been posted.
@@ -187,12 +188,24 @@ class StabilizerMonitor:
     def start(self) -> None:
         """Start telemetry collection in a background thread."""
         self._stop_requested = False
-        thread = threading.Thread(target=self._run, daemon=True)
-        thread.start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def stop(self) -> None:
         """Signal the background thread to stop."""
         self._stop_requested = True
+
+    def join(self, timeout: float = 1.0) -> None:
+        """Wait for the background thread to finish.
+
+        Call after stop() to ensure log configs are fully cleaned up
+        before the radio link closes.
+
+        Args:
+            timeout: Maximum seconds to wait.
+        """
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
 
     def _run(self) -> None:
         """Background thread: streams telemetry and checks safety limits."""
@@ -211,9 +224,8 @@ class StabilizerMonitor:
 
                 data = log_entry[1]
                 update_state_from_log(self.state, data)
-                if (
-                    check_roll(self.state, self._max_roll_deg, self._event_queue)
-                    or check_pitch(self.state, self._max_pitch_deg, self._event_queue)
-                    or check_battery(self.state, self._min_battery_v, self._event_queue)
-                ):
+                roll_bad = check_roll(self.state, self._max_roll_deg, self._event_queue)
+                pitch_bad = check_pitch(self.state, self._max_pitch_deg, self._event_queue)
+                batt_bad = check_battery(self.state, self._min_battery_v, self._event_queue)
+                if roll_bad or pitch_bad or batt_bad:
                     self._triggered = True

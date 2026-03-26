@@ -118,6 +118,10 @@ def main() -> None:
     print(f"Connecting to {URI}...")
     with SyncCrazyflie(URI) as scf:
         print("Connected.")
+        scf.cf.commander.send_stop_setpoint()
+        scf.cf.commander.send_notify_setpoint_stop()
+        scf.cf.platform.send_arming_request(True)
+        time.sleep(0.1)
         pre_flight(scf)
 
         stabilizer_monitor = StabilizerMonitor(scf, event_queue)
@@ -163,9 +167,19 @@ def main() -> None:
         finally:
             collision_monitor.detach_motion_commander()
             collision_monitor.stop()
+            collision_monitor.join()
             flight_time = time.time() - flight_start
             stabilizer_monitor.stop()
-            post_flight(scf)
+            stabilizer_monitor.join()
+            try:
+                post_flight(scf)
+            except Exception:
+                pass
+            try:
+                scf.cf.commander.send_stop_setpoint()
+                scf.cf.commander.send_notify_setpoint_stop()
+            except Exception:
+                pass
             print(f"Total flight time: {flight_time:.1f} s")
 
 

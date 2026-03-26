@@ -99,6 +99,7 @@ class CollisionMonitor:
         self._triggered = False
         self._mc: Optional[MotionCommander] = None
         self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
 
     def attach_motion_commander(self, mc: MotionCommander) -> None:
         """Attach a MotionCommander so movement stops immediately on collision.
@@ -135,12 +136,24 @@ class CollisionMonitor:
         """Start monitoring in a background thread."""
         self._stop_requested = False
         self._triggered = False
-        thread = threading.Thread(target=self._run, daemon=True)
-        thread.start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def stop(self) -> None:
         """Signal the background thread to stop."""
         self._stop_requested = True
+
+    def join(self, timeout: float = 1.0) -> None:
+        """Wait for the background thread to finish.
+
+        Call after stop() to ensure log configs are fully cleaned up
+        before the radio link closes.
+
+        Args:
+            timeout: Maximum seconds to wait.
+        """
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
 
     def _trigger(self, ranger: MultiRangerDeck) -> None:
         """Fire the collision response if not already triggered.

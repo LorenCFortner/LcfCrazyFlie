@@ -244,3 +244,136 @@ class TestMinDistance:
         monitor._run_once()
 
         mock_ranger.is_obstacle_within.assert_called_with(pytest.approx(0.3))
+
+
+class TestStartStopJoin:
+    def test_start_launches_background_thread(self, mock_scf, event_queue, mocker):
+        mock_thread = mocker.patch("Crazyflie.safety.collision_monitor.threading.Thread")
+        monitor = CollisionMonitor(mock_scf, event_queue)
+
+        monitor.start()
+
+        mock_thread.assert_called_once()
+        mock_thread.return_value.start.assert_called_once()
+
+    def test_start_resets_triggered_flag(self, mock_scf, event_queue, mocker):
+        mocker.patch("Crazyflie.safety.collision_monitor.threading.Thread")
+        monitor = CollisionMonitor(mock_scf, event_queue)
+        monitor._triggered = True
+
+        monitor.start()
+
+        assert monitor._triggered is False
+
+    def test_start_resets_stop_requested_flag(self, mock_scf, event_queue, mocker):
+        mocker.patch("Crazyflie.safety.collision_monitor.threading.Thread")
+        monitor = CollisionMonitor(mock_scf, event_queue)
+        monitor._stop_requested = True
+
+        monitor.start()
+
+        assert monitor._stop_requested is False
+
+    def test_stop_sets_stop_flag(self, mock_scf, event_queue):
+        monitor = CollisionMonitor(mock_scf, event_queue)
+
+        monitor.stop()
+
+        assert monitor._stop_requested is True
+
+    def test_join_calls_thread_join_with_timeout(self, mock_scf, event_queue, mocker):
+        mock_thread = mocker.MagicMock()
+        monitor = CollisionMonitor(mock_scf, event_queue)
+        monitor._thread = mock_thread
+
+        monitor.join(timeout=2.0)
+
+        mock_thread.join.assert_called_once_with(timeout=2.0)
+
+    def test_join_does_nothing_when_thread_is_none(self, mock_scf, event_queue):
+        monitor = CollisionMonitor(mock_scf, event_queue)
+        monitor._thread = None
+
+        monitor.join()  # should not raise
+
+
+class TestRunOnce:
+    def test_triggers_when_obstacle_within(self, monitor_with_ranger):
+        monitor, mock_ranger, eq = monitor_with_ranger
+        mock_ranger.is_obstacle_within.return_value = True
+        mock_ranger.get_readings.return_value = _readings()
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+        assert eq.get_nowait() == "COLLISION"
+
+    def test_does_not_trigger_when_already_triggered(self, monitor_with_ranger):
+        monitor, mock_ranger, eq = monitor_with_ranger
+        mock_ranger.is_obstacle_within.return_value = True
+        monitor._triggered = True
+
+        monitor._run_once()
+
+        assert eq.empty()
+
+
+class TestRun:
+    def _make_ranger(self, mocker, obstacle: bool = False):
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = _readings()
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck",
+            return_value=mock_ranger,
+        )
+        mocker.patch("Crazyflie.safety.collision_monitor.time.sleep")
+        return mock_ranger
+
+    def test_run_polls_ranger_then_stops(self, mock_scf, event_queue, mocker):
+        mock_ranger = self._make_ranger(mocker)
+        monitor = CollisionMonitor(mock_scf, event_queue)
+
+        def stop_after_first_poll(*args, **kwargs):
+            monitor._stop_requested = True
+            return False
+
+        mock_ranger.is_obstacle_within.side_effect = stop_after_first_poll
+
+        monitor._run()
+
+        mock_ranger.is_obstacle_within.assert_called()
+
+    def test_run_triggers_on_obstacle_detection(self, mock_scf, event_queue, mocker):
+        mock_ranger = self._make_ranger(mocker)
+        monitor = CollisionMonitor(mock_scf, event_queue)
+
+        def obstacle_then_stop(*args, **kwargs):
+            monitor._stop_requested = True
+            return True
+
+        mock_ranger.is_obstacle_within.side_effect = obstacle_then_stop
+
+        monitor._run()
+
+        assert monitor.is_triggered() is True
+        assert event_queue.get_nowait() == "COLLISION"
+
+    def test_run_does_not_trigger_twice(self, mock_scf, event_queue, mocker):
+        mock_ranger = self._make_ranger(mocker)
+        monitor = CollisionMonitor(mock_scf, event_queue)
+        call_count = 0
+
+        def obstacle_twice(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                monitor._stop_requested = True
+            return True
+
+        mock_ranger.is_obstacle_within.side_effect = obstacle_twice
+
+        monitor._run()
+
+        assert event_queue.qsize() == 1

@@ -211,3 +211,116 @@ class TestIsTriggered:
         monitor._triggered = False
 
         assert monitor.is_triggered() is False
+
+
+class TestJoin:
+    def test_join_calls_thread_join_with_timeout(self, mock_scf, mock_queue, mocker):
+        mock_thread = mocker.MagicMock()
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+        monitor._thread = mock_thread
+
+        monitor.join(timeout=2.0)
+
+        mock_thread.join.assert_called_once_with(timeout=2.0)
+
+    def test_join_does_nothing_when_thread_is_none(self, mock_scf, mock_queue):
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+        monitor._thread = None
+
+        monitor.join()  # should not raise
+
+
+class TestRun:
+    def _make_log_entry(
+        self,
+        roll: float = 0.0,
+        pitch: float = 0.0,
+        yaw: float = 0.0,
+        height: int = 0,
+        battery_v: float = 4.0,
+        battery_state: int = 0,
+    ) -> tuple:
+        return (None, {
+            "stabilizer.roll": roll,
+            "stabilizer.pitch": pitch,
+            "stabilizer.yaw": yaw,
+            "range.zrange": height,
+            "pm.vbat": battery_v,
+            "pm.state": battery_state,
+        }, None)
+
+    def _patch_sync_logger(self, mocker, entries: list):
+        mock_logger = mocker.MagicMock()
+        mock_logger.__enter__ = mocker.MagicMock(return_value=mock_logger)
+        mock_logger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_logger.__iter__ = mocker.MagicMock(return_value=iter(entries))
+        mocker.patch(
+            "Crazyflie.telemetry.stabilizer_monitor.SyncLogger",
+            return_value=mock_logger,
+        )
+        mocker.patch("Crazyflie.telemetry.stabilizer_monitor.LogConfig")
+        return mock_logger
+
+    def test_run_updates_state_from_log_entry(self, mock_scf, mock_queue, mocker):
+        self._patch_sync_logger(mocker, [self._make_log_entry(roll=5.0, height=300)])
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+
+        monitor._run()
+
+        assert monitor.state.roll_deg == pytest.approx(5.0)
+        assert monitor.state.height_mm == 300
+
+    def test_run_stops_immediately_when_stop_requested(self, mock_scf, mock_queue, mocker):
+        self._patch_sync_logger(mocker, [self._make_log_entry()])
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+        monitor._stop_requested = True
+
+        monitor._run()  # should complete without hanging
+
+    def test_run_posts_batlow_and_sets_triggered_on_low_battery(
+        self, mock_scf, mock_queue, mocker
+    ):
+        eq = queue.Queue()
+        self._patch_sync_logger(mocker, [self._make_log_entry(battery_v=3.0)])
+        monitor = StabilizerMonitor(mock_scf, eq)
+
+        monitor._run()
+
+        assert eq.get_nowait() == "BATLOW"
+        assert monitor.is_triggered() is True
+
+    def test_run_posts_crash_and_sets_triggered_on_roll_exceeded(
+        self, mock_scf, mock_queue, mocker
+    ):
+        eq = queue.Queue()
+        self._patch_sync_logger(mocker, [self._make_log_entry(roll=30.0)])
+        monitor = StabilizerMonitor(mock_scf, eq)
+
+        monitor._run()
+
+        assert eq.get_nowait() == "CRASH"
+        assert monitor.is_triggered() is True
+
+    def test_run_posts_crash_and_sets_triggered_on_pitch_exceeded(
+        self, mock_scf, mock_queue, mocker
+    ):
+        eq = queue.Queue()
+        self._patch_sync_logger(mocker, [self._make_log_entry(pitch=-30.0)])
+        monitor = StabilizerMonitor(mock_scf, eq)
+
+        monitor._run()
+
+        assert eq.get_nowait() == "CRASH"
+        assert monitor.is_triggered() is True
+
+    def test_run_does_not_set_triggered_when_all_nominal(
+        self, mock_scf, mock_queue, mocker
+    ):
+        eq = queue.Queue()
+        self._patch_sync_logger(mocker, [self._make_log_entry(battery_v=4.0)])
+        monitor = StabilizerMonitor(mock_scf, eq)
+
+        monitor._run()
+
+        assert eq.empty()
+        assert monitor.is_triggered() is False

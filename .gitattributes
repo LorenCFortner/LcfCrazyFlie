@@ -1,0 +1,13 @@
+# Enforce CRLF line endings for all text files on all platforms.
+* text=auto eol=crlf
+
+# Treat binary files as binary (no line-ending conversion).
+*.pyc binary
+*.pyd binary
+*.so  binary
+*.dll binary
+*.exe binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

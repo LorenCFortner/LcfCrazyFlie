@@ -1,8 +1,3 @@
-# Local dev tools
-.claude/
-CLAUDE.md
-push_claude.bat
-
 # Python
 __pycache__/
 *.py[cod]

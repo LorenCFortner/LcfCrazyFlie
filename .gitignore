@@ -1,6 +1,7 @@
 # Claude Code
 .claude/
 CLAUDE.md
+push_claude.bat
 
 # Python
 __pycache__/

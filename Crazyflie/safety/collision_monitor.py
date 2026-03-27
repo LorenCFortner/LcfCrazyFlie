@@ -196,6 +196,7 @@ class CollisionMonitor:
         """Background thread: polls Multi-ranger and reacts to obstacles."""
         with MultiRangerDeck(self._scf) as ranger:
             while not self._stop_requested:
-                if not self._triggered and ranger.is_obstacle_within(self._min_distance_m):
+                obstacle_detected = ranger.is_obstacle_within(self._min_distance_m)
+                if not self._triggered and obstacle_detected:
                     self._trigger(ranger)
                 time.sleep(_POLL_INTERVAL_S)

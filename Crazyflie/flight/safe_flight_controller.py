@@ -21,7 +21,7 @@ Example:
 """
 
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from cflib.positioning.motion_commander import MotionCommander
 
@@ -92,7 +92,7 @@ class SafeFlightController:
     def run(
         self,
         mc: MotionCommander,
-        should_abort: Optional[Callable[[], bool]] = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path in order.
 
@@ -116,7 +116,7 @@ class SafeFlightController:
     def run_out_and_back(
         self,
         mc: MotionCommander,
-        should_abort: Optional[Callable[[], bool]] = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path outbound, pivot 180°, then retrace back home.
 
@@ -168,7 +168,7 @@ class SafeFlightController:
     def run_reversed(
         self,
         mc: MotionCommander,
-        should_abort: Optional[Callable[[], bool]] = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path in reverse to return home.
 
@@ -197,7 +197,7 @@ class SafeFlightController:
         command: str,
         distance_m: float,
         velocity: float,
-        should_abort: Optional[Callable[[], bool]],
+        should_abort: Callable[[], bool] | None,
     ) -> bool:
         """Start a movement, poll for abort every 50 ms, then stop.
 
@@ -232,7 +232,7 @@ class SafeFlightController:
     @staticmethod
     def _sleep_interruptible(
         duration_s: float,
-        should_abort: Optional[Callable[[], bool]],
+        should_abort: Callable[[], bool] | None,
     ) -> bool:
         """Sleep for duration_s, checking should_abort every 50 ms.
 

@@ -26,6 +26,7 @@ from Crazyflie.flight.safe_flight_controller import SafeFlightController
 from Crazyflie.safety.clearance_check import check_preflight_clearance
 from Crazyflie.safety.collision_monitor import CollisionMonitor
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
+from Crazyflie.safety.takeoff_verifier import verify_takeoff
 from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,7 @@ def main() -> None:
     controller = SafeFlightController(OUT_AND_BACK_PATH)
 
     logger.info(f"Connecting to {URI}...")
+    
     with SyncCrazyflie(URI) as scf:
         logger.info("Connected.")
         scf.cf.commander.send_stop_setpoint()
@@ -149,7 +151,9 @@ def main() -> None:
 
         # Give monitors one poll cycle to read initial telemetry.
         time.sleep(0.15)
-        logger.info(f"Battery: {stabilizer_monitor.state.battery_v:.2f} V")
+        initial_battery_v = stabilizer_monitor.state.battery_v
+        initial_height_mm = stabilizer_monitor.state.height_mm
+        logger.info(f"Battery: {initial_battery_v:.2f} V")
 
         flight_start = time.time()
 
@@ -168,6 +172,15 @@ def main() -> None:
                         f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm"
                         f" | battery: {batt:.2f} V"
                     )
+
+                if not verify_takeoff(
+                    height_mm=stabilizer_monitor.state.height_mm,
+                    battery_v=stabilizer_monitor.state.battery_v,
+                    initial_height_mm=initial_height_mm,
+                    initial_battery_v=initial_battery_v,
+                ):
+                    return
+
                 logger.info("Flying out 1 metre and back...")
                 controller.run_out_and_back(mc, should_abort=should_abort)
                 collision_monitor.detach_motion_commander()

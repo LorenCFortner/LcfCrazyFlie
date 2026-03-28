@@ -4,15 +4,13 @@ Written test-first following the TDD rules for this project.
 """
 
 import queue
-import threading
-import time
 
 import pytest
 
 from Crazyflie.decks.multi_ranger import MultiRangerReadings
 from Crazyflie.safety.collision_monitor import (
-    CollisionMonitor,
     DEFAULT_MIN_DISTANCE_M,
+    CollisionMonitor,
     find_avoidance_move,
 )
 
@@ -43,9 +41,7 @@ def monitor_with_ranger(mock_scf, event_queue, mock_ranger, mocker):
     return monitor, mock_ranger, event_queue
 
 
-def _readings(
-    front=None, back=None, left=None, right=None, up=None
-) -> MultiRangerReadings:
+def _readings(front=None, back=None, left=None, right=None, up=None) -> MultiRangerReadings:
     return MultiRangerReadings(front=front, back=back, left=left, right=right, up=up)
 
 
@@ -238,7 +234,9 @@ class TestMinDistance:
         mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
         mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
         mock_ranger.is_obstacle_within.return_value = False
-        mocker.patch("Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger)
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
 
         monitor = CollisionMonitor(mock_scf, event_queue, min_distance_m=0.3)
         monitor._run_once()

@@ -18,12 +18,11 @@ unit-tested independently of threads.
 import queue
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any
 
 from cflib.crazyflie.log import LogConfig
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.crazyflie.syncLogger import SyncLogger
-
 
 MIN_BATTERY_VOLTAGE_V = 3.5
 MAX_ROLL_DEG = 20.0
@@ -34,6 +33,7 @@ MS_BETWEEN_UPDATES = 100
 @dataclass
 class DroneState:
     """Snapshot of the drone's current telemetry."""
+
     roll_deg: float = 0.0
     pitch_deg: float = 0.0
     yaw_deg: float = 0.0
@@ -46,7 +46,8 @@ class DroneState:
 # Pure safety check functions — testable without a drone or threads
 # ---------------------------------------------------------------------------
 
-def update_state_from_log(state: DroneState, data: dict) -> None:
+
+def update_state_from_log(state: DroneState, data: dict[str, Any]) -> None:
     """Update a DroneState in-place from a SyncLogger data dict.
 
     Args:
@@ -64,7 +65,7 @@ def update_state_from_log(state: DroneState, data: dict) -> None:
 def check_battery(
     state: DroneState,
     min_battery_v: float = MIN_BATTERY_VOLTAGE_V,
-    event_queue: Optional[queue.Queue] = None,
+    event_queue: queue.Queue[str] | None = None,
 ) -> bool:
     """Check if battery voltage is below the safe minimum.
 
@@ -86,7 +87,7 @@ def check_battery(
 def check_roll(
     state: DroneState,
     max_roll_deg: float = MAX_ROLL_DEG,
-    event_queue: Optional[queue.Queue] = None,
+    event_queue: queue.Queue[str] | None = None,
 ) -> bool:
     """Check if roll exceeds the safety limit.
 
@@ -108,7 +109,7 @@ def check_roll(
 def check_pitch(
     state: DroneState,
     max_pitch_deg: float = MAX_PITCH_DEG,
-    event_queue: Optional[queue.Queue] = None,
+    event_queue: queue.Queue[str] | None = None,
 ) -> bool:
     """Check if pitch exceeds the safety limit.
 
@@ -131,6 +132,7 @@ def check_pitch(
 # Monitor class — owns the background thread
 # ---------------------------------------------------------------------------
 
+
 class StabilizerMonitor:
     """Monitors stabilizer telemetry in a background thread.
 
@@ -147,7 +149,7 @@ class StabilizerMonitor:
     def __init__(
         self,
         scf: SyncCrazyflie,
-        event_queue: queue.Queue,
+        event_queue: queue.Queue[str],
         max_roll_deg: float = MAX_ROLL_DEG,
         max_pitch_deg: float = MAX_PITCH_DEG,
         min_battery_v: float = MIN_BATTERY_VOLTAGE_V,
@@ -172,7 +174,7 @@ class StabilizerMonitor:
         self.state = DroneState()
         self._stop_requested = False
         self._triggered = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     def is_triggered(self) -> bool:
         """Return True if a CRASH or BATLOW event has been posted.

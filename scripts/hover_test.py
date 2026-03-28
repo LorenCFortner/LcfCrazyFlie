@@ -24,8 +24,7 @@ URI = "radio://0/1/250K"
 HOVER_DURATION_S = 10.0
 _POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
-logging.basicConfig(level=logging.ERROR)
-logging.getLogger("cflib").setLevel(logging.CRITICAL)
+logger = logging.getLogger(__name__)
 
 
 def pre_flight(scf: SyncCrazyflie) -> None:
@@ -49,7 +48,7 @@ def post_flight(scf: SyncCrazyflie) -> None:
 
 
 def handle_safety_events(
-    event_queue: queue.Queue,
+    event_queue: queue.Queue[str],
     mc: MotionCommander,
     scf: SyncCrazyflie,
     monitor: StabilizerMonitor,
@@ -70,20 +69,20 @@ def handle_safety_events(
     except queue.Empty:
         return False
 
-    print(f"Safety event received: {event}")
+    logger.info(f"Safety event received: {event}")
     monitor.stop()
 
     if event == "CRASH":
-        print("CRASH detected — emergency landing.")
+        logger.warning("CRASH detected — emergency landing.")
         land_immediately(mc)
     elif event == "BATLOW":
-        print("Low battery — landing now.")
+        logger.warning("Low battery — landing now.")
         land_on_low_battery(mc)
     elif event == "COLLISION":
-        print("Obstacle detected — avoidance complete, landing now.")
+        logger.warning("Obstacle detected — avoidance complete, landing now.")
         land_immediately(mc)
     else:
-        print(f"Unknown event '{event}' — landing immediately as precaution.")
+        logger.warning(f"Unknown event '{event}' — landing immediately as precaution.")
         land_immediately(mc)
 
     return True
@@ -91,13 +90,17 @@ def handle_safety_events(
 
 def main() -> None:
     """Main entry point for the hover test script."""
+    logging.basicConfig(level=logging.ERROR)
+    logging.getLogger("cflib").setLevel(logging.CRITICAL)
+    logging.getLogger(__name__).setLevel(logging.INFO)
+
     cflib.crtp.init_drivers(enable_debug_driver=False)
 
-    event_queue: queue.Queue = queue.Queue()
+    event_queue: queue.Queue[str] = queue.Queue()
 
-    print(f"Connecting to {URI}...")
+    logger.info(f"Connecting to {URI}...")
     with SyncCrazyflie(URI) as scf:
-        print("Connected.")
+        logger.info("Connected.")
         scf.cf.commander.send_stop_setpoint()
         scf.cf.commander.send_notify_setpoint_stop()
         scf.cf.platform.send_arming_request(True)
@@ -114,19 +117,21 @@ def main() -> None:
         time.sleep(0.15)
         initial_battery_v = stabilizer_monitor.state.battery_v
         initial_height_mm = stabilizer_monitor.state.height_mm
-        print(f"Battery: {initial_battery_v:.2f} V")
+        logger.info(f"Battery: {initial_battery_v:.2f} V")
 
         flight_start = time.time()
 
         try:
             with MotionCommander(scf) as mc:
                 collision_monitor.attach_motion_commander(mc)
-                print("Airborne — stabilizing for 3 seconds...")
+                logger.info("Airborne — stabilizing for 3 seconds...")
                 for i in range(3):
                     time.sleep(1.0)
                     height_cm = stabilizer_monitor.state.height_mm / 10.0
                     batt = stabilizer_monitor.state.battery_v
-                    print(f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V")
+                    logger.info(
+                        f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V"
+                    )
 
                 if not verify_takeoff(
                     height_mm=stabilizer_monitor.state.height_mm,
@@ -136,7 +141,7 @@ def main() -> None:
                 ):
                     return
 
-                print(f"Hovering for {HOVER_DURATION_S:.0f} seconds...")
+                logger.info(f"Hovering for {HOVER_DURATION_S:.0f} seconds...")
 
                 start_time = time.time()
                 last_status_s = -1.0
@@ -150,17 +155,17 @@ def main() -> None:
                     if elapsed_int % 2 == 0 and elapsed_int != last_status_s:
                         last_status_s = elapsed_int
                         batt = stabilizer_monitor.state.battery_v
-                        print(
+                        logger.info(
                             f"  Hover: {elapsed_int}s / {HOVER_DURATION_S:.0f}s  "
                             f"| battery: {batt:.2f} V"
                         )
 
                     time.sleep(0.1)
 
-                print("Hover complete — landing.")
+                logger.info("Hover complete — landing.")
 
         except Exception as exc:
-            print(f"Flight error: {exc}")
+            logger.error(f"Flight error: {exc}")
         finally:
             collision_monitor.detach_motion_commander()
             collision_monitor.stop()
@@ -177,7 +182,7 @@ def main() -> None:
                 scf.cf.commander.send_notify_setpoint_stop()
             except Exception:
                 pass
-            print(f"Total flight time: {flight_time:.1f} s")
+            logger.info(f"Total flight time: {flight_time:.1f} s")
 
     time.sleep(_POST_DISCONNECT_SLEEP_S)
 

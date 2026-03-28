@@ -104,9 +104,7 @@ class SafeFlightController:
         for step in self._steps:
             if should_abort and should_abort():
                 return
-            aborted = self._execute(
-                mc, step.command, step.distance_m, step.velocity, should_abort
-            )
+            aborted = self._execute(mc, step.command, step.distance_m, step.velocity, should_abort)
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -132,9 +130,7 @@ class SafeFlightController:
         for step in self._steps:
             if should_abort and should_abort():
                 return
-            aborted = self._execute(
-                mc, step.command, step.distance_m, step.velocity, should_abort
-            )
+            aborted = self._execute(mc, step.command, step.distance_m, step.velocity, should_abort)
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -156,9 +152,7 @@ class SafeFlightController:
             if should_abort and should_abort():
                 return
             inverted = _TURN_AROUND_INVERSION.get(step.command, step.command)
-            aborted = self._execute(
-                mc, inverted, step.distance_m, step.velocity, should_abort
-            )
+            aborted = self._execute(mc, inverted, step.distance_m, step.velocity, should_abort)
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -182,9 +176,7 @@ class SafeFlightController:
             if should_abort and should_abort():
                 return
             inverted = _REVERSE_DIRECTION.get(step.command, step.command)
-            aborted = self._execute(
-                mc, inverted, step.distance_m, step.velocity, should_abort
-            )
+            aborted = self._execute(mc, inverted, step.distance_m, step.velocity, should_abort)
             if aborted:
                 return
             if step.settle_s > 0.0:

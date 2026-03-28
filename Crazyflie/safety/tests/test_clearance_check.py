@@ -13,9 +13,7 @@ from Crazyflie.safety.clearance_check import (
 )
 
 
-def _readings(
-    front=None, back=None, left=None, right=None, up=None
-) -> MultiRangerReadings:
+def _readings(front=None, back=None, left=None, right=None, up=None) -> MultiRangerReadings:
     return MultiRangerReadings(front=front, back=back, left=left, right=right, up=up)
 
 
@@ -84,9 +82,7 @@ def mock_ranger(mocker):
     ranger = mocker.MagicMock()
     ranger.__enter__ = mocker.MagicMock(return_value=ranger)
     ranger.__exit__ = mocker.MagicMock(return_value=False)
-    ranger.get_readings.return_value = _readings(
-        front=1.0, back=1.0, left=1.0, right=1.0, up=1.0
-    )
+    ranger.get_readings.return_value = _readings(front=1.0, back=1.0, left=1.0, right=1.0, up=1.0)
     return ranger
 
 
@@ -128,9 +124,7 @@ class TestCheckPreflightClearance:
             ("up", {"front": 1.0, "back": 1.0, "left": 1.0, "right": 1.0, "up": 0.1}),
         ],
     )
-    def test_returns_false_for_each_blocked_direction(
-        self, patched_clearance, direction, kwargs
-    ):
+    def test_returns_false_for_each_blocked_direction(self, patched_clearance, direction, kwargs):
         scf, ranger = patched_clearance
         ranger.get_readings.return_value = _readings(**kwargs)
         assert check_preflight_clearance(scf) is False

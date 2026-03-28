@@ -4,7 +4,6 @@ Written test-first following the TDD rules for this project.
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
 
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
 
@@ -127,13 +126,16 @@ class TestGetReadings:
 
 
 class TestIsObstacleWithin:
-    @pytest.mark.parametrize("direction,value", [
-        ("front", 0.1),
-        ("back",  0.1),
-        ("left",  0.1),
-        ("right", 0.1),
-        ("up",    0.1),
-    ])
+    @pytest.mark.parametrize(
+        "direction,value",
+        [
+            ("front", 0.1),
+            ("back", 0.1),
+            ("left", 0.1),
+            ("right", 0.1),
+            ("up", 0.1),
+        ],
+    )
     def test_returns_true_when_single_direction_is_close(self, ranger, direction, value):
         deck, mock_mr = ranger
         for d in ("front", "back", "left", "right", "up"):

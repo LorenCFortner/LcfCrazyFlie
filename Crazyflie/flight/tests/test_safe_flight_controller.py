@@ -4,12 +4,12 @@ Written test-first (TDD). All movements use non-blocking start_*/stop so that
 should_abort is checked every poll cycle during movement, not only between steps.
 """
 
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 from Crazyflie.flight.path_runner import FlightStep
 from Crazyflie.flight.safe_flight_controller import SafeFlightController
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -151,9 +151,7 @@ class TestAbortMidMove:
             return len(calls) > 0  # True once start_forward has been called
 
         with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
-            single_step("forward", distance=10.0).run(
-                mock_mc, should_abort=abort_after_start
-            )
+            single_step("forward", distance=10.0).run(mock_mc, should_abort=abort_after_start)
 
         assert "stop" in calls
 

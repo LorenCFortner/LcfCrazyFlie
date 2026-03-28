@@ -6,69 +6,119 @@ Thread lifecycle (start/stop) is tested separately with mocks.
 """
 
 import queue
+
 import pytest
 
 from Crazyflie.telemetry.stabilizer_monitor import (
     DroneState,
     StabilizerMonitor,
     check_battery,
-    check_roll,
     check_pitch,
+    check_roll,
     update_state_from_log,
 )
-
 
 # ---------------------------------------------------------------------------
 # DroneState — update from raw log data
 # ---------------------------------------------------------------------------
 
+
 class TestUpdateStateFromLog:
     def test_sets_roll_from_log_data(self):
         state = DroneState()
-        update_state_from_log(state, {"stabilizer.roll": 5.2, "stabilizer.pitch": 0.0,
-                                      "stabilizer.yaw": 0.0, "range.zrange": 0,
-                                      "pm.vbat": 4.0, "pm.state": 0})
+        update_state_from_log(
+            state,
+            {
+                "stabilizer.roll": 5.2,
+                "stabilizer.pitch": 0.0,
+                "stabilizer.yaw": 0.0,
+                "range.zrange": 0,
+                "pm.vbat": 4.0,
+                "pm.state": 0,
+            },
+        )
         assert state.roll_deg == pytest.approx(5.2)
 
     def test_sets_pitch_from_log_data(self):
         state = DroneState()
-        update_state_from_log(state, {"stabilizer.roll": 0.0, "stabilizer.pitch": -3.1,
-                                      "stabilizer.yaw": 0.0, "range.zrange": 0,
-                                      "pm.vbat": 4.0, "pm.state": 0})
+        update_state_from_log(
+            state,
+            {
+                "stabilizer.roll": 0.0,
+                "stabilizer.pitch": -3.1,
+                "stabilizer.yaw": 0.0,
+                "range.zrange": 0,
+                "pm.vbat": 4.0,
+                "pm.state": 0,
+            },
+        )
         assert state.pitch_deg == pytest.approx(-3.1)
 
     def test_sets_yaw_from_log_data(self):
         state = DroneState()
-        update_state_from_log(state, {"stabilizer.roll": 0.0, "stabilizer.pitch": 0.0,
-                                      "stabilizer.yaw": 90.0, "range.zrange": 0,
-                                      "pm.vbat": 4.0, "pm.state": 0})
+        update_state_from_log(
+            state,
+            {
+                "stabilizer.roll": 0.0,
+                "stabilizer.pitch": 0.0,
+                "stabilizer.yaw": 90.0,
+                "range.zrange": 0,
+                "pm.vbat": 4.0,
+                "pm.state": 0,
+            },
+        )
         assert state.yaw_deg == pytest.approx(90.0)
 
     def test_sets_height_mm_from_log_data(self):
         state = DroneState()
-        update_state_from_log(state, {"stabilizer.roll": 0.0, "stabilizer.pitch": 0.0,
-                                      "stabilizer.yaw": 0.0, "range.zrange": 450,
-                                      "pm.vbat": 4.0, "pm.state": 0})
+        update_state_from_log(
+            state,
+            {
+                "stabilizer.roll": 0.0,
+                "stabilizer.pitch": 0.0,
+                "stabilizer.yaw": 0.0,
+                "range.zrange": 450,
+                "pm.vbat": 4.0,
+                "pm.state": 0,
+            },
+        )
         assert state.height_mm == 450
 
     def test_sets_battery_voltage_from_log_data(self):
         state = DroneState()
-        update_state_from_log(state, {"stabilizer.roll": 0.0, "stabilizer.pitch": 0.0,
-                                      "stabilizer.yaw": 0.0, "range.zrange": 0,
-                                      "pm.vbat": 3.85, "pm.state": 0})
+        update_state_from_log(
+            state,
+            {
+                "stabilizer.roll": 0.0,
+                "stabilizer.pitch": 0.0,
+                "stabilizer.yaw": 0.0,
+                "range.zrange": 0,
+                "pm.vbat": 3.85,
+                "pm.state": 0,
+            },
+        )
         assert state.battery_v == pytest.approx(3.85)
 
     def test_sets_battery_state_from_log_data(self):
         state = DroneState()
-        update_state_from_log(state, {"stabilizer.roll": 0.0, "stabilizer.pitch": 0.0,
-                                      "stabilizer.yaw": 0.0, "range.zrange": 0,
-                                      "pm.vbat": 4.0, "pm.state": 2})
+        update_state_from_log(
+            state,
+            {
+                "stabilizer.roll": 0.0,
+                "stabilizer.pitch": 0.0,
+                "stabilizer.yaw": 0.0,
+                "range.zrange": 0,
+                "pm.vbat": 4.0,
+                "pm.state": 2,
+            },
+        )
         assert state.battery_state == 2
 
 
 # ---------------------------------------------------------------------------
 # check_battery
 # ---------------------------------------------------------------------------
+
 
 class TestCheckBattery:
     def test_returns_false_when_voltage_above_minimum(self):
@@ -85,7 +135,7 @@ class TestCheckBattery:
 
     def test_posts_batlow_to_queue_when_low(self):
         state = DroneState(battery_v=3.5)
-        event_queue = queue.Queue()
+        event_queue: queue.Queue[str] = queue.Queue()
 
         check_battery(state, min_battery_v=3.7, event_queue=event_queue)
 
@@ -93,7 +143,7 @@ class TestCheckBattery:
 
     def test_does_not_post_when_battery_ok(self):
         state = DroneState(battery_v=3.9)
-        event_queue = queue.Queue()
+        event_queue: queue.Queue[str] = queue.Queue()
 
         check_battery(state, min_battery_v=3.7, event_queue=event_queue)
 
@@ -103,6 +153,7 @@ class TestCheckBattery:
 # ---------------------------------------------------------------------------
 # check_roll
 # ---------------------------------------------------------------------------
+
 
 class TestCheckRoll:
     def test_returns_false_when_roll_within_spec(self):
@@ -123,7 +174,7 @@ class TestCheckRoll:
 
     def test_posts_crash_to_queue_when_out_of_spec(self):
         state = DroneState(roll_deg=30.0)
-        event_queue = queue.Queue()
+        event_queue: queue.Queue[str] = queue.Queue()
 
         check_roll(state, max_roll_deg=20.0, event_queue=event_queue)
 
@@ -131,7 +182,7 @@ class TestCheckRoll:
 
     def test_does_not_post_when_roll_in_spec(self):
         state = DroneState(roll_deg=5.0)
-        event_queue = queue.Queue()
+        event_queue: queue.Queue[str] = queue.Queue()
 
         check_roll(state, max_roll_deg=20.0, event_queue=event_queue)
 
@@ -141,6 +192,7 @@ class TestCheckRoll:
 # ---------------------------------------------------------------------------
 # check_pitch
 # ---------------------------------------------------------------------------
+
 
 class TestCheckPitch:
     def test_returns_false_when_pitch_within_spec(self):
@@ -157,7 +209,7 @@ class TestCheckPitch:
 
     def test_posts_crash_to_queue_when_out_of_spec(self):
         state = DroneState(pitch_deg=30.0)
-        event_queue = queue.Queue()
+        event_queue: queue.Queue[str] = queue.Queue()
 
         check_pitch(state, max_pitch_deg=20.0, event_queue=event_queue)
 
@@ -165,7 +217,7 @@ class TestCheckPitch:
 
     def test_does_not_post_when_pitch_in_spec(self):
         state = DroneState(pitch_deg=5.0)
-        event_queue = queue.Queue()
+        event_queue: queue.Queue[str] = queue.Queue()
 
         check_pitch(state, max_pitch_deg=20.0, event_queue=event_queue)
 
@@ -175,6 +227,7 @@ class TestCheckPitch:
 # ---------------------------------------------------------------------------
 # StabilizerMonitor lifecycle
 # ---------------------------------------------------------------------------
+
 
 class TestStabilizerMonitorLifecycle:
     def test_start_launches_a_thread(self, mock_scf, mock_queue, mocker):
@@ -239,15 +292,19 @@ class TestRun:
         height: int = 0,
         battery_v: float = 4.0,
         battery_state: int = 0,
-    ) -> tuple:
-        return (None, {
-            "stabilizer.roll": roll,
-            "stabilizer.pitch": pitch,
-            "stabilizer.yaw": yaw,
-            "range.zrange": height,
-            "pm.vbat": battery_v,
-            "pm.state": battery_state,
-        }, None)
+    ) -> tuple[object, dict[str, object], object]:
+        return (
+            None,
+            {
+                "stabilizer.roll": roll,
+                "stabilizer.pitch": pitch,
+                "stabilizer.yaw": yaw,
+                "range.zrange": height,
+                "pm.vbat": battery_v,
+                "pm.state": battery_state,
+            },
+            None,
+        )
 
     def _patch_sync_logger(self, mocker, entries: list):
         mock_logger = mocker.MagicMock()
@@ -280,7 +337,7 @@ class TestRun:
     def test_run_posts_batlow_and_sets_triggered_on_low_battery(
         self, mock_scf, mock_queue, mocker
     ):
-        eq = queue.Queue()
+        eq: queue.Queue[str] = queue.Queue()
         self._patch_sync_logger(mocker, [self._make_log_entry(battery_v=3.0)])
         monitor = StabilizerMonitor(mock_scf, eq)
 
@@ -292,7 +349,7 @@ class TestRun:
     def test_run_posts_crash_and_sets_triggered_on_roll_exceeded(
         self, mock_scf, mock_queue, mocker
     ):
-        eq = queue.Queue()
+        eq: queue.Queue[str] = queue.Queue()
         self._patch_sync_logger(mocker, [self._make_log_entry(roll=30.0)])
         monitor = StabilizerMonitor(mock_scf, eq)
 
@@ -304,7 +361,7 @@ class TestRun:
     def test_run_posts_crash_and_sets_triggered_on_pitch_exceeded(
         self, mock_scf, mock_queue, mocker
     ):
-        eq = queue.Queue()
+        eq: queue.Queue[str] = queue.Queue()
         self._patch_sync_logger(mocker, [self._make_log_entry(pitch=-30.0)])
         monitor = StabilizerMonitor(mock_scf, eq)
 
@@ -313,10 +370,8 @@ class TestRun:
         assert eq.get_nowait() == "CRASH"
         assert monitor.is_triggered() is True
 
-    def test_run_does_not_set_triggered_when_all_nominal(
-        self, mock_scf, mock_queue, mocker
-    ):
-        eq = queue.Queue()
+    def test_run_does_not_set_triggered_when_all_nominal(self, mock_scf, mock_queue, mocker):
+        eq: queue.Queue[str] = queue.Queue()
         self._patch_sync_logger(mocker, [self._make_log_entry(battery_v=4.0)])
         monitor = StabilizerMonitor(mock_scf, eq)
 

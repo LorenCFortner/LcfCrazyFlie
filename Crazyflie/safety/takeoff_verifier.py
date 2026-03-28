@@ -13,8 +13,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MIN_TAKEOFF_HEIGHT_DELTA_MM: int = 100   # 10 cm — well below hover height (~40 cm)
-MIN_VOLTAGE_DROP_V: float = 0.05         # 50 mV sag expected under motor load
+MIN_TAKEOFF_HEIGHT_DELTA_MM: int = 100  # 10 cm — well below hover height (~40 cm)
+MIN_VOLTAGE_DROP_V: float = 0.05  # 50 mV sag expected under motor load
 
 
 def verify_takeoff(

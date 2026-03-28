@@ -3,7 +3,7 @@
 Written test-first (TDD).
 """
 
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
 

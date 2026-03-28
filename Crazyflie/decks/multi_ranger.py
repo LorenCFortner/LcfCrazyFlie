@@ -36,6 +36,7 @@ class MultiRangerReadings:
         right: Distance to the right in metres, or None if nothing within 8 m.
         up: Distance above in metres, or None if nothing within 8 m.
     """
+
     front: Optional[float]
     back: Optional[float]
     left: Optional[float]
@@ -70,7 +71,7 @@ class MultiRangerDeck:
         self._multiranger.__enter__()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         if self._multiranger is not None:
             self._multiranger.__exit__(exc_type, exc_val, exc_tb)
             self._multiranger = None

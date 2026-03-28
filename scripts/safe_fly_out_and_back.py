@@ -70,7 +70,7 @@ def post_flight(scf: SyncCrazyflie) -> None:
 
 
 def handle_safety_events(
-    event_queue: queue.Queue,
+    event_queue: queue.Queue[str],
     mc: MotionCommander,
     scf: SyncCrazyflie,
     stabilizer_monitor: StabilizerMonitor,
@@ -123,11 +123,11 @@ def main() -> None:
 
     cflib.crtp.init_drivers(enable_debug_driver=False)
 
-    event_queue: queue.Queue = queue.Queue()
+    event_queue: queue.Queue[str] = queue.Queue()
     controller = SafeFlightController(OUT_AND_BACK_PATH)
 
     logger.info(f"Connecting to {URI}...")
-    
+
     with SyncCrazyflie(URI) as scf:
         logger.info("Connected.")
         scf.cf.commander.send_stop_setpoint()
@@ -137,9 +137,7 @@ def main() -> None:
 
         logger.info("Checking pre-flight clearance...")
         if not check_preflight_clearance(scf):
-            logger.error(
-                "Pre-flight clearance check FAILED — too close to an obstacle. Aborting."
-            )
+            logger.error("Pre-flight clearance check FAILED — too close to an obstacle. Aborting.")
             return
         logger.info("Clearance OK.")
 

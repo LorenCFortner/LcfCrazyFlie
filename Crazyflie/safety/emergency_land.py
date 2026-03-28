@@ -10,9 +10,8 @@ import time
 
 from cflib.positioning.motion_commander import MotionCommander
 
-
-_EMERGENCY_STEP_M = 0.1      # Descent per step during emergency
-_EMERGENCY_STEPS = 6         # 6 × 0.1m = 0.6m total descent
+_EMERGENCY_STEP_M = 0.1  # Descent per step during emergency
+_EMERGENCY_STEPS = 6  # 6 × 0.1m = 0.6m total descent
 _EMERGENCY_STEP_PAUSE_S = 0.2
 
 

@@ -4,6 +4,7 @@ Written test-first (TDD). Each test was written before its implementation.
 """
 
 import pytest
+
 from Crazyflie.decks.led_ring import LedRingDeck
 
 
@@ -69,14 +70,17 @@ class TestSetColorRgb:
 
 
 class TestSetBrightness:
-    @pytest.mark.parametrize("brightness,expected", [
-        (0,   "0"),
-        (31,  "31"),
-        (128, "128"),
-        (255, "255"),
-        (-1,  "0"),    # clamped to min
-        (300, "255"),  # clamped to max
-    ])
+    @pytest.mark.parametrize(
+        "brightness,expected",
+        [
+            (0, "0"),
+            (31, "31"),
+            (128, "128"),
+            (255, "255"),
+            (-1, "0"),  # clamped to min
+            (300, "255"),  # clamped to max
+        ],
+    )
     def test_sets_all_channels_to_same_value(self, mock_scf, brightness, expected):
         LedRingDeck.set_brightness(mock_scf, brightness)
 
@@ -123,8 +127,7 @@ class TestSetBrightnessFromHeightMm:
 
         # Extract the value actually set for the red channel
         red_calls = [
-            c for c in mock_scf.cf.param.set_value.call_args_list
-            if c[0][0] == "ring.solidRed"
+            c for c in mock_scf.cf.param.set_value.call_args_list if c[0][0] == "ring.solidRed"
         ]
         assert len(red_calls) == 1
         brightness = int(red_calls[0][0][1])
@@ -143,20 +146,21 @@ class TestSetBrightnessFromHeightMm:
     def test_all_three_channels_are_set_to_same_value(self, mock_scf):
         LedRingDeck.set_brightness_from_height_mm(mock_scf, 20)
 
-        mock_scf.cf.param.set_value.assert_any_call("ring.solidRed",   "31")
+        mock_scf.cf.param.set_value.assert_any_call("ring.solidRed", "31")
         mock_scf.cf.param.set_value.assert_any_call("ring.solidGreen", "31")
-        mock_scf.cf.param.set_value.assert_any_call("ring.solidBlue",  "31")
+        mock_scf.cf.param.set_value.assert_any_call("ring.solidBlue", "31")
 
-    @pytest.mark.parametrize("height_mm,expected_brightness", [
-        (20,   31),    # min height -> min brightness
-        (1164, 255),   # max height -> max brightness
-        (10,   31),    # below min -> clamped
-        (2000, 255),   # above max -> clamped
-        (592,  143),   # ~mid point: formula gives ~143
-    ])
+    @pytest.mark.parametrize(
+        "height_mm,expected_brightness",
+        [
+            (20, 31),  # min height -> min brightness
+            (1164, 255),  # max height -> max brightness
+            (10, 31),  # below min -> clamped
+            (2000, 255),  # above max -> clamped
+            (592, 143),  # ~mid point: formula gives ~143
+        ],
+    )
     def test_parametrized_boundary_cases(self, mock_scf, height_mm, expected_brightness):
         LedRingDeck.set_brightness_from_height_mm(mock_scf, height_mm)
 
-        mock_scf.cf.param.set_value.assert_any_call(
-            "ring.solidRed", str(expected_brightness)
-        )
+        mock_scf.cf.param.set_value.assert_any_call("ring.solidRed", str(expected_brightness))

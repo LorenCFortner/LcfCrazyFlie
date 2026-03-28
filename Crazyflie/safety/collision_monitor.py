@@ -25,7 +25,6 @@ Example:
 import queue
 import threading
 import time
-from typing import Optional
 
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.positioning.motion_commander import MotionCommander
@@ -35,13 +34,13 @@ from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
 DEFAULT_MIN_DISTANCE_M: float = 0.1
 _POLL_INTERVAL_S: float = 0.05  # 20 Hz
 _AVOID_DISTANCE_M: float = 0.2  # how far to back away from the obstacle
-_AVOID_VELOCITY: float = 0.3    # m/s during avoidance move
+_AVOID_VELOCITY: float = 0.3  # m/s during avoidance move
 
 
 def find_avoidance_move(
     readings: MultiRangerReadings,
     min_distance_m: float,
-) -> Optional[str]:
+) -> str | None:
     """Return the MotionCommander method to move away from the nearest obstacle.
 
     Checks sensors in priority order (front, back, left, right, up) and returns
@@ -57,10 +56,10 @@ def find_avoidance_move(
     """
     checks = [
         (readings.front, "back"),
-        (readings.back,  "forward"),
-        (readings.left,  "right"),
+        (readings.back, "forward"),
+        (readings.left, "right"),
         (readings.right, "left"),
-        (readings.up,    "down"),
+        (readings.up, "down"),
     ]
     for value, direction in checks:
         if value is not None and 0.0 < value < min_distance_m:
@@ -82,7 +81,7 @@ class CollisionMonitor:
     def __init__(
         self,
         scf: SyncCrazyflie,
-        event_queue: queue.Queue,
+        event_queue: queue.Queue[str],
         min_distance_m: float = DEFAULT_MIN_DISTANCE_M,
     ) -> None:
         """Initialise the collision monitor.
@@ -97,9 +96,9 @@ class CollisionMonitor:
         self._min_distance_m = min_distance_m
         self._stop_requested = False
         self._triggered = False
-        self._mc: Optional[MotionCommander] = None
+        self._mc: MotionCommander | None = None
         self._lock = threading.Lock()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     def attach_motion_commander(self, mc: MotionCommander) -> None:
         """Attach a MotionCommander so movement stops immediately on collision.
@@ -173,13 +172,9 @@ class CollisionMonitor:
         with self._lock:
             if self._mc is not None:
                 self._mc.stop()
-                direction = find_avoidance_move(
-                    ranger.get_readings(), self._min_distance_m
-                )
+                direction = find_avoidance_move(ranger.get_readings(), self._min_distance_m)
                 if direction is not None:
-                    getattr(self._mc, direction)(
-                        _AVOID_DISTANCE_M, velocity=_AVOID_VELOCITY
-                    )
+                    getattr(self._mc, direction)(_AVOID_DISTANCE_M, velocity=_AVOID_VELOCITY)
         self._event_queue.put("COLLISION")
 
     def _run_once(self) -> None:

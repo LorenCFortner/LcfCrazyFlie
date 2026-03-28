@@ -16,21 +16,24 @@ from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from Crazyflie.decks.multi_ranger import MultiRangerDeck
 
 URI = "radio://0/1/250K"
-TRIGGER_DISTANCE_M = 0.1   # same default as CollisionMonitor
+TRIGGER_DISTANCE_M = 0.1  # same default as CollisionMonitor
 POLL_INTERVAL_S = 0.1
 _POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
-logging.basicConfig(level=logging.ERROR)
-logging.getLogger("cflib").setLevel(logging.CRITICAL)
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     """Stream ranger readings until an obstacle is detected."""
+    logging.basicConfig(level=logging.ERROR)
+    logging.getLogger("cflib").setLevel(logging.CRITICAL)
+    logging.getLogger(__name__).setLevel(logging.INFO)
+
     cflib.crtp.init_drivers(enable_debug_driver=False)
 
-    print(f"Connecting to {URI}...")
-    print(f"Trigger distance: {TRIGGER_DISTANCE_M} m")
-    print("Watching sensors — bring something close to trigger.\n")
+    logger.info(f"Connecting to {URI}...")
+    logger.info(f"Trigger distance: {TRIGGER_DISTANCE_M} m")
+    logger.info("Watching sensors — bring something close to trigger.")
 
     with SyncCrazyflie(URI) as scf:
         with MultiRangerDeck(scf) as ranger:
@@ -38,15 +41,15 @@ def main() -> None:
                 readings = ranger.get_readings()
 
                 front = readings.front
-                back  = readings.back
-                left  = readings.left
+                back = readings.back
+                left = readings.left
                 right = readings.right
-                up    = readings.up
+                up = readings.up
 
-                def fmt(v):
+                def fmt(v: float | None) -> str:
                     return f"{v:.3f}" if v is not None else " None"
 
-                print(
+                logger.info(
                     f"front={fmt(front)}  back={fmt(back)}  "
                     f"left={fmt(left)}  right={fmt(right)}  up={fmt(up)}"
                 )
@@ -55,25 +58,26 @@ def main() -> None:
                     name: value
                     for name, value in {
                         "front": front,
-                        "back":  back,
-                        "left":  left,
+                        "back": back,
+                        "left": left,
                         "right": right,
-                        "up":    up,
+                        "up": up,
                     }.items()
                     if value is not None and value > 0.0 and value < TRIGGER_DISTANCE_M
                 }
 
                 if triggered:
-                    print()  # newline after the \r status line
-                    print("\n--- TRIGGER ---")
+                    logger.info("--- TRIGGER ---")
                     for name, value in triggered.items():
-                        print(f"  {name}: {value:.3f} m  (threshold: {TRIGGER_DISTANCE_M} m)")
+                        logger.info(
+                            f"  {name}: {value:.3f} m  (threshold: {TRIGGER_DISTANCE_M} m)"
+                        )
                     break
 
                 time.sleep(POLL_INTERVAL_S)
 
     time.sleep(_POST_DISCONNECT_SLEEP_S)
-    print("\nDone.")
+    logger.info("Done.")
 
 
 if __name__ == "__main__":

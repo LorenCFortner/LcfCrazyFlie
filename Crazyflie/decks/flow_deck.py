@@ -31,8 +31,8 @@ class FlowDeckReadings:
     """
 
     height_mm: float | None
-    delta_x: int | None
-    delta_y: int | None
+    delta_x: float | None
+    delta_y: float | None
 
 
 class FlowDeck:
@@ -63,8 +63,8 @@ class FlowDeck:
         self._scf = scf
         self._log_config: LogConfig | None = None
         self._height_mm: float | None = None
-        self._delta_x: int | None = None
-        self._delta_y: int | None = None
+        self._delta_x: float | None = None
+        self._delta_y: float | None = None
 
     def __enter__(self) -> "FlowDeck":
         self._log_config = LogConfig(name="FlowDeck", period_in_ms=_LOG_PERIOD_MS)
@@ -81,7 +81,7 @@ class FlowDeck:
             self._log_config.stop()
             self._log_config = None
 
-    def _on_data(self, timestamp: int, data: dict, log_config: LogConfig) -> None:
+    def _on_data(self, timestamp: int, data: dict[str, float], log_config: LogConfig) -> None:
         """Callback invoked by cflib each time a log packet arrives.
 
         Args:
@@ -99,12 +99,12 @@ class FlowDeck:
         return self._height_mm
 
     @property
-    def delta_x(self) -> int | None:
+    def delta_x(self) -> float | None:
         """Optical flow X count, or None if no data yet."""
         return self._delta_x
 
     @property
-    def delta_y(self) -> int | None:
+    def delta_y(self) -> float | None:
         """Optical flow Y count, or None if no data yet."""
         return self._delta_y
 
@@ -142,7 +142,7 @@ class FlowDeck:
         log_config = LogConfig(name="FlowDeckHeight", period_in_ms=_LOG_PERIOD_MS)
         log_config.add_variable("range.zrange", "uint16_t")
 
-        def on_data(timestamp: int, data: dict, lc: LogConfig) -> None:
+        def on_data(timestamp: int, data: dict[str, float], lc: LogConfig) -> None:
             if "range.zrange" in data:
                 container["height_mm"] = float(data["range.zrange"])
                 ready.set()

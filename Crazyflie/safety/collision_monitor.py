@@ -22,6 +22,7 @@ Example:
     >>> monitor.stop()
 """
 
+import logging
 import queue
 import threading
 import time
@@ -30,6 +31,8 @@ from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_DISTANCE_M: float = 0.1
 _POLL_INTERVAL_S: float = 0.05  # 20 Hz
@@ -65,6 +68,34 @@ def find_avoidance_move(
         if value is not None and 0.0 < value < min_distance_m:
             return direction
     return None
+
+
+def _log_all_readings(
+    label: str,
+    readings: MultiRangerReadings,
+    threshold_m: float,
+) -> None:
+    """Log all ranger distances with a context label.
+
+    Args:
+        label: Prefix shown before the sensor values.
+        readings: Current MultiRangerReadings snapshot.
+        threshold_m: Trigger threshold, shown alongside readings for context.
+    """
+
+    def _fmt(v: float | None) -> str:
+        return f"{v:.3f} m" if v is not None else "  None"
+
+    logger.warning(
+        "%s (threshold %.3f m) — front=%s  back=%s  left=%s  right=%s  up=%s",
+        label,
+        threshold_m,
+        _fmt(readings.front),
+        _fmt(readings.back),
+        _fmt(readings.left),
+        _fmt(readings.right),
+        _fmt(readings.up),
+    )
 
 
 class CollisionMonitor:
@@ -169,11 +200,21 @@ class CollisionMonitor:
         if self._triggered:
             return
         self._triggered = True
+
+        readings = ranger.get_readings()
+        _log_all_readings("COLLISION triggered", readings, self._min_distance_m)
+
         with self._lock:
             if self._mc is not None:
                 self._mc.stop()
-                direction = find_avoidance_move(ranger.get_readings(), self._min_distance_m)
+                direction = find_avoidance_move(readings, self._min_distance_m)
                 if direction is not None:
+                    logger.warning(
+                        "Avoidance: moving %s %.2f m at %.1f m/s",
+                        direction,
+                        _AVOID_DISTANCE_M,
+                        _AVOID_VELOCITY,
+                    )
                     getattr(self._mc, direction)(_AVOID_DISTANCE_M, velocity=_AVOID_VELOCITY)
         self._event_queue.put("COLLISION")
 
@@ -189,9 +230,13 @@ class CollisionMonitor:
 
     def _run(self) -> None:
         """Background thread: polls Multi-ranger and reacts to obstacles."""
+        warn_threshold = self._min_distance_m * 3.0  # warn at 3x trigger distance
         with MultiRangerDeck(self._scf) as ranger:
             while not self._stop_requested:
+                readings = ranger.get_readings()
                 obstacle_detected = ranger.is_obstacle_within(self._min_distance_m)
                 if not self._triggered and obstacle_detected:
                     self._trigger(ranger)
+                elif not self._triggered and ranger.is_obstacle_within(warn_threshold):
+                    _log_all_readings("Obstacle approaching", readings, self._min_distance_m)
                 time.sleep(_POLL_INTERVAL_S)

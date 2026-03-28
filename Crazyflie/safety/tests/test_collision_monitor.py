@@ -31,6 +31,11 @@ def mock_ranger(mocker):
     ranger.__enter__ = mocker.MagicMock(return_value=ranger)
     ranger.__exit__ = mocker.MagicMock(return_value=False)
     ranger.is_obstacle_within.return_value = False
+    # get_readings() must return a real MultiRangerReadings so _log_all_readings
+    # can format the float fields without TypeError from MagicMock.__format__.
+    ranger.get_readings.return_value = MultiRangerReadings(
+        front=0.05, back=None, left=None, right=None, up=None
+    )
     return ranger
 
 

@@ -17,12 +17,15 @@ from cflib.positioning.motion_commander import MotionCommander
 from Crazyflie.decks.led_ring import LedRingDeck
 from Crazyflie.safety.collision_monitor import CollisionMonitor
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
+from Crazyflie.safety.takeoff_verifier import verify_takeoff
 from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
 URI = "radio://0/1/250K"
 HOVER_DURATION_S = 10.0
+_POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
 logging.basicConfig(level=logging.ERROR)
+logging.getLogger("cflib").setLevel(logging.CRITICAL)
 
 
 def pre_flight(scf: SyncCrazyflie) -> None:
@@ -109,7 +112,9 @@ def main() -> None:
 
         # Give the monitor one poll cycle to read initial telemetry.
         time.sleep(0.15)
-        print(f"Battery: {stabilizer_monitor.state.battery_v:.2f} V")
+        initial_battery_v = stabilizer_monitor.state.battery_v
+        initial_height_mm = stabilizer_monitor.state.height_mm
+        print(f"Battery: {initial_battery_v:.2f} V")
 
         flight_start = time.time()
 
@@ -122,6 +127,15 @@ def main() -> None:
                     height_cm = stabilizer_monitor.state.height_mm / 10.0
                     batt = stabilizer_monitor.state.battery_v
                     print(f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V")
+
+                if not verify_takeoff(
+                    height_mm=stabilizer_monitor.state.height_mm,
+                    battery_v=stabilizer_monitor.state.battery_v,
+                    initial_height_mm=initial_height_mm,
+                    initial_battery_v=initial_battery_v,
+                ):
+                    return
+
                 print(f"Hovering for {HOVER_DURATION_S:.0f} seconds...")
 
                 start_time = time.time()
@@ -164,6 +178,8 @@ def main() -> None:
             except Exception:
                 pass
             print(f"Total flight time: {flight_time:.1f} s")
+
+    time.sleep(_POST_DISCONNECT_SLEEP_S)
 
 
 if __name__ == "__main__":

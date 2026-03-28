@@ -21,12 +21,15 @@ from Crazyflie.decks.led_ring import LedRingDeck
 from Crazyflie.flight.path_runner import FlightStep, PathRunner
 from Crazyflie.safety.collision_monitor import CollisionMonitor
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
+from Crazyflie.safety.takeoff_verifier import verify_takeoff
 from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
 # Radio connection — adjust channel/bitrate to match your Crazyradio config.
 URI = "radio://0/1/250K"
+_POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
 logging.basicConfig(level=logging.ERROR)
+logging.getLogger("cflib").setLevel(logging.CRITICAL)
 
 # ---------------------------------------------------------------------------
 # Flight path (outbound leg from Spikes MuiltiThreadedFlightAroundTheHouse.py)
@@ -137,6 +140,12 @@ def main() -> None:
         collision_monitor = CollisionMonitor(scf, event_queue)
         collision_monitor.start()
 
+        # Give monitors one poll cycle to read initial telemetry.
+        time.sleep(0.15)
+        initial_battery_v = stabilizer_monitor.state.battery_v
+        initial_height_mm = stabilizer_monitor.state.height_mm
+        print(f"Battery: {initial_battery_v:.2f} V")
+
         try:
             with MotionCommander(scf) as mc:
                 collision_monitor.attach_motion_commander(mc)
@@ -146,6 +155,15 @@ def main() -> None:
                     height_cm = stabilizer_monitor.state.height_mm / 10.0
                     batt = stabilizer_monitor.state.battery_v
                     print(f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V")
+
+                if not verify_takeoff(
+                    height_mm=stabilizer_monitor.state.height_mm,
+                    battery_v=stabilizer_monitor.state.battery_v,
+                    initial_height_mm=initial_height_mm,
+                    initial_battery_v=initial_battery_v,
+                ):
+                    return
+
                 print("Starting outbound leg...")
                 runner.run_out_and_back(
                     mc,
@@ -180,6 +198,8 @@ def main() -> None:
                 scf.cf.commander.send_notify_setpoint_stop()
             except Exception:
                 pass
+
+    time.sleep(_POST_DISCONNECT_SLEEP_S)
 
 
 if __name__ == "__main__":

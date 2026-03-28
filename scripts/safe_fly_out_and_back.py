@@ -32,6 +32,7 @@ from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 logger = logging.getLogger(__name__)
 
 URI = "radio://0/1/250K"
+_POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
 OUT_AND_BACK_PATH = [
     FlightStep("forward", 1.0, velocity=0.3),
@@ -117,6 +118,7 @@ def handle_safety_events(
 def main() -> None:
     """Main entry point for the safe fly-out-and-back script."""
     logging.basicConfig(level=logging.ERROR)
+    logging.getLogger("cflib").setLevel(logging.CRITICAL)
     logging.getLogger(__name__).setLevel(logging.INFO)
 
     cflib.crtp.init_drivers(enable_debug_driver=False)
@@ -211,6 +213,8 @@ def main() -> None:
             except Exception:
                 pass
             logger.info(f"Total flight time: {flight_time:.1f} s")
+
+    time.sleep(_POST_DISCONNECT_SLEEP_S)
 
 
 if __name__ == "__main__":

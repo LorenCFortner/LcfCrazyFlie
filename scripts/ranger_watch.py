@@ -18,8 +18,10 @@ from Crazyflie.decks.multi_ranger import MultiRangerDeck
 URI = "radio://0/1/250K"
 TRIGGER_DISTANCE_M = 0.1   # same default as CollisionMonitor
 POLL_INTERVAL_S = 0.1
+_POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
 logging.basicConfig(level=logging.ERROR)
+logging.getLogger("cflib").setLevel(logging.CRITICAL)
 
 
 def main() -> None:
@@ -70,6 +72,7 @@ def main() -> None:
 
                 time.sleep(POLL_INTERVAL_S)
 
+    time.sleep(_POST_DISCONNECT_SLEEP_S)
     print("\nDone.")
 
 

@@ -21,12 +21,15 @@ from cflib.positioning.motion_commander import MotionCommander
 from Crazyflie.decks.led_ring import LedRingDeck
 from Crazyflie.flight.path_runner import FlightStep, PathRunner
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
+from Crazyflie.safety.takeoff_verifier import verify_takeoff
 from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
 # Radio connection — adjust channel/bitrate to match your Crazyradio config.
 URI = "radio://0/80/2M"
+_POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
 logging.basicConfig(level=logging.ERROR)
+logging.getLogger("cflib").setLevel(logging.CRITICAL)
 
 # ---------------------------------------------------------------------------
 # Hover path: rise 0.4 m, then run_out_and_back returns to start height.
@@ -120,8 +123,29 @@ def main() -> None:
         monitor = StabilizerMonitor(scf, event_queue)
         monitor.start()
 
+        # Give monitor one poll cycle to read initial telemetry.
+        time.sleep(0.15)
+        initial_battery_v = monitor.state.battery_v
+        initial_height_mm = monitor.state.height_mm
+        print(f"Battery: {initial_battery_v:.2f} V")
+
         try:
             with MotionCommander(scf) as mc:
+                print("Airborne — stabilizing for 3 seconds...")
+                for i in range(3):
+                    time.sleep(1.0)
+                    height_cm = monitor.state.height_mm / 10.0
+                    batt = monitor.state.battery_v
+                    print(f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V")
+
+                if not verify_takeoff(
+                    height_mm=monitor.state.height_mm,
+                    battery_v=monitor.state.battery_v,
+                    initial_height_mm=initial_height_mm,
+                    initial_battery_v=initial_battery_v,
+                ):
+                    return
+
                 print("Hovering on bed — rising 0.4 m and returning.")
                 runner.run_out_and_back(mc)
 
@@ -142,6 +166,8 @@ def main() -> None:
         finally:
             monitor.stop()
             post_flight(scf)
+
+    time.sleep(_POST_DISCONNECT_SLEEP_S)
 
 
 if __name__ == "__main__":

@@ -50,12 +50,13 @@ _POLL_INTERVAL_S: float = 0.05  # 20 Hz
 
 # Velocity-dependent threshold formula: max(_BASE_DETECTION_M, velocity * _REACTION_S)
 _REACTION_S: float = 0.20  # tuning constant — calibrate empirically
-_BASE_DETECTION_M: float = DEFAULT_MIN_DISTANCE_M  # floor detection distance
+_BASE_DETECTION_M: float = 0.35  # floor detection distance (empirically tuned: ranger
+# updates at ~10 Hz and the drone coasts ~80 mm before mc.stop() takes effect at 0.3 m/s)
 _BASE_AVOID_M: float = 0.20  # floor avoidance reversal distance
 
 # Theoretical cap: velocity at which the formula equals the base floor.
 # Above this speed the drone cannot reliably stop in time with current tuning.
-MAX_SAFE_VELOCITY_M_S: float = _BASE_DETECTION_M / _REACTION_S  # = 1.0 m/s
+MAX_SAFE_VELOCITY_M_S: float = _BASE_DETECTION_M / _REACTION_S  # = 1.75 m/s
 
 # Fallback avoidance velocity used when no FlightState is provided.
 # Preserves the original hardcoded behavior for backward compatibility.

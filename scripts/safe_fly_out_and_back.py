@@ -40,7 +40,7 @@ URI = "radio://0/1/250K"
 _POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
 OUT_AND_BACK_PATH = [
-    FlightStep("forward", 1.0, velocity=0.3),
+    FlightStep("forward", 3.0, velocity=0.3),
 ]
 
 

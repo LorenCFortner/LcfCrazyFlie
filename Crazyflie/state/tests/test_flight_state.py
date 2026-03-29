@@ -91,3 +91,96 @@ class TestThreadSafety:
             t.join()
 
         assert state.get_velocity() in written
+
+
+class TestDirectionDefaults:
+    def test_initial_direction_is_none(self):
+        state = FlightState()
+
+        assert state.get_direction() is None
+
+    def test_direction_not_affected_by_velocity_constructor_arg(self):
+        state = FlightState(current_velocity_m_s=0.5)
+
+        assert state.get_direction() is None
+
+
+class TestSetGetDirection:
+    def test_set_direction_updates_value(self):
+        state = FlightState()
+
+        state.set_direction("forward")
+
+        assert state.get_direction() == "forward"
+
+    def test_multiple_sets_reflect_latest_direction(self):
+        state = FlightState()
+
+        state.set_direction("forward")
+        state.set_direction("left")
+
+        assert state.get_direction() == "left"
+
+    def test_set_direction_to_none(self):
+        state = FlightState()
+        state.set_direction("forward")
+
+        state.set_direction(None)
+
+        assert state.get_direction() is None
+
+    def test_all_linear_direction_strings_round_trip(self):
+        state = FlightState()
+        for direction in ("forward", "back", "left", "right", "up"):
+            state.set_direction(direction)
+            assert state.get_direction() == direction
+
+    def test_velocity_and_direction_are_independent(self):
+        state = FlightState()
+
+        state.set_velocity(0.5)
+        state.set_direction("right")
+
+        assert state.get_velocity() == pytest.approx(0.5)
+        assert state.get_direction() == "right"
+
+
+class TestDirectionThreadSafety:
+    def test_concurrent_direction_writes_do_not_raise(self):
+        """Many threads writing direction concurrently must not raise or corrupt state."""
+        state = FlightState()
+        directions = ["forward", "back", "left", "right", "up", None]
+        errors: list[str] = []
+
+        def writer(direction: str | None) -> None:
+            try:
+                for _ in range(1000):
+                    state.set_direction(direction)
+                    _ = state.get_direction()
+            except Exception as exc:
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=writer, args=(d,)) for d in directions]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+
+    def test_final_direction_after_concurrent_writes_is_one_of_the_written_values(self):
+        """After all threads finish, stored direction must be one written by a thread."""
+        state = FlightState()
+        written = {"forward", "back", "left", "right", "up"}
+
+        def writer(direction: str) -> None:
+            for _ in range(200):
+                state.set_direction(direction)
+
+        threads = [threading.Thread(target=writer, args=(d,)) for d in written]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert state.get_direction() in written

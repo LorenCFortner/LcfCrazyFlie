@@ -63,34 +63,60 @@ MAX_SAFE_VELOCITY_M_S: float = _BASE_DETECTION_M / _REACTION_S  # ≈ 1.17 m/s
 # Preserves the original hardcoded behavior for backward compatibility.
 _FALLBACK_AVOID_VELOCITY: float = 0.6
 
+# Fixed blade-clearance for non-flight-direction sensors.
+# Blade tips are ~5 cm from each sensor face; 5 cm × 2 sides = 10 cm minimum.
+_SIDE_CLEARANCE_M: float = 0.10
+
+# Maps SafeFlightController command names to MultiRangerReadings field names.
+# "down" is intentionally absent — the Flow deck owns that axis.
+_FLIGHT_DIR_TO_SENSOR: dict[str, str] = {
+    "forward": "front",
+    "back": "back",
+    "left": "left",
+    "right": "right",
+    "up": "up",
+}
+
 
 def find_avoidance_move(
     readings: MultiRangerReadings,
-    min_distance_m: float,
+    flight_direction: str | None,
+    dynamic_threshold: float,
 ) -> str | None:
     """Return the MotionCommander method to move away from the nearest obstacle.
 
-    Checks sensors in priority order (front, back, left, right, up) and returns
-    the opposite direction for the first sensor closer than min_distance_m.
+    Checks sensors in priority order (front, back, left, right, up).
+    The sensor corresponding to ``flight_direction`` is checked against
+    ``dynamic_threshold``; all other sensors are checked against
+    ``_SIDE_CLEARANCE_M``.  When ``flight_direction`` is ``None`` every
+    sensor uses ``_SIDE_CLEARANCE_M``.
 
     Args:
         readings: Current MultiRangerReadings snapshot.
-        min_distance_m: Trigger threshold in metres.
+        flight_direction: Active flight-direction command name
+            ('forward', 'back', 'left', 'right', 'up'), or None when
+            hovering or turning.
+        dynamic_threshold: Velocity-dependent trigger threshold in metres,
+            applied only to the sensor that faces the flight direction.
 
     Returns:
         MotionCommander method name ('back', 'forward', 'right', 'left', 'down'),
-        or None if no sensor is below the threshold.
+        or None if no sensor is below its threshold.
     """
+    active_sensor = _FLIGHT_DIR_TO_SENSOR.get(flight_direction or "")
     checks = [
-        (readings.front, "back"),
-        (readings.back, "forward"),
-        (readings.left, "right"),
-        (readings.right, "left"),
-        (readings.up, "down"),
+        (readings.front, "front", "back"),
+        (readings.back, "back", "forward"),
+        (readings.left, "left", "right"),
+        (readings.right, "right", "left"),
+        (readings.up, "up", "down"),
     ]
-    for value, direction in checks:
-        if value is not None and 0.0 < value < min_distance_m:
-            return direction
+    for value, sensor_name, avoidance in checks:
+        if value is None or value <= 0.0:
+            continue
+        threshold = dynamic_threshold if sensor_name == active_sensor else _SIDE_CLEARANCE_M
+        if value < threshold:
+            return avoidance
     return None
 
 
@@ -247,6 +273,36 @@ class CollisionMonitor:
             return self._compute_threshold(self._flight_state.get_velocity())
         return self._min_distance_m
 
+    def _effective_flight_direction(self) -> str | None:
+        """Return the current flight direction from FlightState, or None.
+
+        Returns:
+            Direction string from FlightState if provided, else None.
+        """
+        if self._flight_state is not None:
+            return self._flight_state.get_direction()
+        return None
+
+    def _obstacle_detected(self, readings: MultiRangerReadings) -> bool:
+        """Return True if any sensor reading exceeds its threshold.
+
+        When FlightState is provided, uses per-sensor directional logic:
+        the flight-direction sensor uses the dynamic velocity-based threshold;
+        all other sensors use _SIDE_CLEARANCE_M.
+
+        When FlightState is None (backward-compat mode), falls back to
+        ranger.is_obstacle_within with the static min_distance_m.
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if an obstacle is within threshold distance.
+        """
+        direction = self._effective_flight_direction()
+        dynamic_threshold = self._effective_threshold()
+        return find_avoidance_move(readings, direction, dynamic_threshold) is not None
+
     def _trigger(self, ranger: MultiRangerDeck) -> None:
         """Fire the collision response if not already triggered.
 
@@ -270,7 +326,8 @@ class CollisionMonitor:
         with self._lock:
             if self._mc is not None:
                 self._mc.stop()
-                direction = find_avoidance_move(readings, threshold)
+                flight_direction = self._effective_flight_direction()
+                direction = find_avoidance_move(readings, flight_direction, threshold)
                 if direction is not None:
                     if self._flight_state is not None:
                         velocity = self._flight_state.get_velocity()
@@ -293,22 +350,50 @@ class CollisionMonitor:
 
         Opens its own MultiRangerDeck context. Intended for unit tests
         that need to exercise the poll logic without a running thread.
+
+        When FlightState is None (backward-compat mode), uses
+        ranger.is_obstacle_within with the static min_distance_m.
+        When FlightState is provided, uses per-sensor directional logic via
+        ranger.get_readings() and find_avoidance_move.
         """
-        threshold = self._effective_threshold()
         with MultiRangerDeck(self._scf) as ranger:
-            if not self._triggered and ranger.is_obstacle_within(threshold):
-                self._trigger(ranger)
+            if self._triggered:
+                return
+            if self._flight_state is None:
+                threshold = self._min_distance_m
+                if ranger.is_obstacle_within(threshold):
+                    self._trigger(ranger)
+            else:
+                readings = ranger.get_readings()
+                if self._obstacle_detected(readings):
+                    self._trigger(ranger)
 
     def _run(self) -> None:
-        """Background thread: polls Multi-ranger and reacts to obstacles."""
+        """Background thread: polls Multi-ranger and reacts to obstacles.
+
+        When FlightState is None (backward-compat mode), uses
+        ranger.is_obstacle_within with the static min_distance_m.
+        When FlightState is provided, uses per-sensor directional logic via
+        ranger.get_readings() and find_avoidance_move.
+        """
         with MultiRangerDeck(self._scf) as ranger:
             while not self._stop_requested:
-                threshold = self._effective_threshold()
-                warn_threshold = threshold * 1.5
-                readings = ranger.get_readings()
-                obstacle_detected = ranger.is_obstacle_within(threshold)
-                if not self._triggered and obstacle_detected:
-                    self._trigger(ranger)
-                elif not self._triggered and ranger.is_obstacle_within(warn_threshold):
-                    _log_all_readings("Obstacle approaching", readings, threshold)
+                if self._flight_state is None:
+                    threshold = self._min_distance_m
+                    warn_threshold = threshold * 1.5
+                    readings = ranger.get_readings()
+                    obstacle_detected = ranger.is_obstacle_within(threshold)
+                    if not self._triggered and obstacle_detected:
+                        self._trigger(ranger)
+                    elif not self._triggered and ranger.is_obstacle_within(warn_threshold):
+                        _log_all_readings("Obstacle approaching", readings, threshold)
+                else:
+                    threshold = self._effective_threshold()
+                    warn_threshold = threshold * 1.5
+                    readings = ranger.get_readings()
+                    obstacle_detected = self._obstacle_detected(readings)
+                    if not self._triggered and obstacle_detected:
+                        self._trigger(ranger)
+                    elif not self._triggered and ranger.is_obstacle_within(warn_threshold):
+                        _log_all_readings("Obstacle approaching", readings, threshold)
                 time.sleep(_POLL_INTERVAL_S)

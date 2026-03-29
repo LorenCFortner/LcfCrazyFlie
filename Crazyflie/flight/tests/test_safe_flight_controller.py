@@ -460,6 +460,130 @@ class TestFlightStateVelocityPropagation:
 
 
 # ---------------------------------------------------------------------------
+# FlightState — direction written before each step
+# ---------------------------------------------------------------------------
+
+
+class TestFlightStateDirectionPropagation:
+    def test_sets_direction_for_forward_step(self, mock_mc, mocker):
+        state = FlightState()
+        spy = mocker.spy(state, "set_direction")
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        spy.assert_called_once_with("forward")
+
+    @pytest.mark.parametrize("command", ["forward", "back", "left", "right", "up"])
+    def test_sets_direction_for_each_linear_command(self, mock_mc, mocker, command):
+        state = FlightState()
+        spy = mocker.spy(state, "set_direction")
+        controller = SafeFlightController(
+            [FlightStep(command, 1.0, velocity=0.3, settle_s=0.0)],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        spy.assert_called_once_with(command)
+
+    def test_sets_none_direction_for_turn_left(self, mock_mc, mocker):
+        state = FlightState()
+        spy = mocker.spy(state, "set_direction")
+        controller = SafeFlightController(
+            [FlightStep("turn_left", 90.0, velocity=45.0, settle_s=0.0)],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        spy.assert_called_once_with(None)
+
+    def test_sets_none_direction_for_turn_right(self, mock_mc, mocker):
+        state = FlightState()
+        spy = mocker.spy(state, "set_direction")
+        controller = SafeFlightController(
+            [FlightStep("turn_right", 90.0, velocity=45.0, settle_s=0.0)],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        spy.assert_called_once_with(None)
+
+    def test_direction_written_for_each_step_in_order(self, mock_mc, mocker):
+        state = FlightState()
+        spy = mocker.spy(state, "set_direction")
+        controller = SafeFlightController(
+            [
+                FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0),
+                FlightStep("left", 0.5, velocity=0.3, settle_s=0.0),
+            ],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        assert spy.call_count == 2
+        assert spy.call_args_list[0].args[0] == "forward"
+        assert spy.call_args_list[1].args[0] == "left"
+
+    def test_direction_not_updated_without_flight_state(self, mock_mc, mocker):
+        """Without FlightState, set_direction is never called."""
+        controller = SafeFlightController([FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)])
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        # No error raised and forward is called normally
+        mock_mc.start_forward.assert_called_once_with(0.3)
+
+    def test_pivot_sets_none_direction_on_flight_state(self, mock_mc, mocker):
+        """The 180° pivot in run_out_and_back must write None direction to FlightState."""
+        state = FlightState()
+        direction_spy = mocker.spy(state, "set_direction")
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run_out_and_back(mock_mc, should_abort=never_abort)
+
+        # Calls: forward (outbound), None (pivot), forward (return)
+        # At minimum one call with None for the pivot
+        none_calls = [c for c in direction_spy.call_args_list if c.args[0] is None]
+        assert len(none_calls) >= 1
+
+    def test_flight_state_not_updated_during_pivot_velocity(self, mock_mc, mocker):
+        """Pivot must not call set_velocity — confirmed from existing test; direction call is None."""
+        state = FlightState()
+        velocity_spy = mocker.spy(state, "set_velocity")
+        direction_spy = mocker.spy(state, "set_direction")
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run_out_and_back(mock_mc, should_abort=never_abort)
+
+        # 1 outbound + 1 return = 2 velocity calls; pivot contributes none
+        assert velocity_spy.call_count == 2
+        # Direction calls: forward, None (pivot), forward = 3 calls
+        assert direction_spy.call_count == 3
+        assert direction_spy.call_args_list[1].args[0] is None
+
+
+# ---------------------------------------------------------------------------
 # Max velocity enforcement
 # ---------------------------------------------------------------------------
 

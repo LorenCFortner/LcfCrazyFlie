@@ -181,9 +181,10 @@ class SafeFlightController:
         if should_abort and should_abort():
             return
 
-        # 180° interruptible pivot to face home — no FlightState update (deg/s, not m/s)
+        # 180° interruptible pivot to face home — sets direction=None on FlightState
+        # (pivot velocity is deg/s, not m/s, so velocity is not updated)
         aborted = self._execute(
-            mc, "turn_right", _PIVOT_DEGREES, _PIVOT_RATE_DEG_PER_S, should_abort
+            mc, "turn_right", _PIVOT_DEGREES, _PIVOT_RATE_DEG_PER_S, should_abort, self._state
         )
         if aborted:
             return
@@ -271,8 +272,12 @@ class SafeFlightController:
                 f"{MAX_SAFE_VELOCITY_M_S:.3f} m/s"
             )
 
-        if flight_state is not None and not is_turn:
-            flight_state.set_velocity(velocity)
+        if flight_state is not None:
+            if is_turn:
+                flight_state.set_direction(None)
+            else:
+                flight_state.set_velocity(velocity)
+                flight_state.set_direction(command)
 
         start_method = _START_METHOD.get(command)
         if start_method is None:

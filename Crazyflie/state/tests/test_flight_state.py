@@ -64,7 +64,7 @@ class TestThreadSafety:
                 for _ in range(1000):
                     state.set_velocity(value)
                     _ = state.get_velocity()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 errors.append(str(exc))
 
         threads = [threading.Thread(target=writer, args=(float(i),)) for i in range(4)]

@@ -4,15 +4,18 @@ Written test-first following the TDD rules for this project.
 """
 
 import queue
+from typing import Any
 
 import pytest
 
 from Crazyflie.decks.multi_ranger import MultiRangerReadings
 from Crazyflie.safety.collision_monitor import (
     DEFAULT_MIN_DISTANCE_M,
+    MAX_SAFE_VELOCITY_M_S,
     CollisionMonitor,
     find_avoidance_move,
 )
+from Crazyflie.state.flight_state import FlightState
 
 
 @pytest.fixture
@@ -380,3 +383,183 @@ class TestRun:
         monitor._run()
 
         assert event_queue.qsize() == 1
+
+
+# ---------------------------------------------------------------------------
+# Velocity-dependent threshold — _compute_threshold
+# ---------------------------------------------------------------------------
+
+
+class TestComputeThreshold:
+    def test_zero_velocity_returns_base_detection(self):
+        # 0.0 * 0.20 = 0.0 < 0.20 (base) → returns base 0.20
+        assert CollisionMonitor._compute_threshold(0.0) == pytest.approx(0.20)
+
+    def test_low_velocity_returns_base_detection(self):
+        # 0.1 * 0.20 = 0.02 < 0.20 → returns base 0.20
+        assert CollisionMonitor._compute_threshold(0.1) == pytest.approx(0.20)
+
+    def test_boundary_velocity_returns_base(self):
+        # At MAX_SAFE_VELOCITY_M_S (1.0): 1.0 * 0.20 = 0.20 == base → max returns 0.20
+        assert CollisionMonitor._compute_threshold(MAX_SAFE_VELOCITY_M_S) == pytest.approx(0.20)
+
+    def test_high_velocity_returns_velocity_times_reaction(self):
+        # 1.5 * 0.20 = 0.30 > 0.20 → returns 0.30
+        assert CollisionMonitor._compute_threshold(1.5) == pytest.approx(0.30)
+
+    def test_threshold_grows_with_velocity(self):
+        low = CollisionMonitor._compute_threshold(0.5)
+        high = CollisionMonitor._compute_threshold(2.0)
+
+        assert high > low
+
+
+# ---------------------------------------------------------------------------
+# Dynamic avoidance — distance and velocity scale with FlightState velocity
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicAvoidance:
+    def _make_monitor_with_state(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        velocity: float,
+    ) -> tuple[CollisionMonitor, Any]:
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=0.05, back=None, left=None, right=None, up=None
+        )
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=velocity)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        return monitor, mock_ranger
+
+    def test_avoidance_distance_is_base_at_low_speed(self, mock_scf, event_queue, mocker):
+        # 0.1 m/s * 0.20 = 0.02 < base 0.20 → avoid_distance = 0.20
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=0.1
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        # back() called with base avoidance distance = 0.20
+        mock_mc.back.assert_called_once()
+        distance_arg = mock_mc.back.call_args[0][0]
+        assert distance_arg == pytest.approx(0.20)
+
+    def test_avoidance_distance_scales_at_high_speed(self, mock_scf, event_queue, mocker):
+        # 1.5 m/s * 0.20 = 0.30 > base 0.20 → avoid_distance = 0.30
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=1.5
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_called_once()
+        distance_arg = mock_mc.back.call_args[0][0]
+        assert distance_arg == pytest.approx(0.30)
+
+    def test_avoidance_velocity_is_two_times_flight_speed(self, mock_scf, event_queue, mocker):
+        # flight at 0.5 m/s → avoidance at 1.0 m/s
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=0.5
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_called_once()
+        velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
+        assert velocity_kwarg == pytest.approx(1.0)
+
+    def test_avoidance_velocity_scales_at_higher_speed(self, mock_scf, event_queue, mocker):
+        # flight at 0.8 m/s → avoidance at 1.6 m/s
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=0.8
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
+        assert velocity_kwarg == pytest.approx(1.6)
+
+
+# ---------------------------------------------------------------------------
+# FlightState integration — threshold passed to ranger each poll cycle
+# ---------------------------------------------------------------------------
+
+
+class TestFlightStateDynamicThreshold:
+    def test_uses_computed_threshold_when_flight_state_provided(
+        self, mock_scf, event_queue, mocker
+    ):
+        # Flight at 1.5 m/s → threshold = max(0.20, 1.5*0.20) = 0.30
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=None, back=None, left=None, right=None, up=None
+        )
+        mock_ranger.is_obstacle_within.return_value = False
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+
+        state = FlightState(current_velocity_m_s=1.5)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        monitor._run_once()
+
+        mock_ranger.is_obstacle_within.assert_called_with(pytest.approx(0.30))
+
+    def test_ignores_min_distance_m_when_flight_state_provided(
+        self, mock_scf, event_queue, mocker
+    ):
+        # min_distance_m=0.5 is ignored; flight_state at 0.1 m/s → threshold = 0.20 (base)
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=None, back=None, left=None, right=None, up=None
+        )
+        mock_ranger.is_obstacle_within.return_value = False
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+
+        state = FlightState(current_velocity_m_s=0.1)
+        monitor = CollisionMonitor(mock_scf, event_queue, min_distance_m=0.5, flight_state=state)
+        monitor._run_once()
+
+        # Should use base 0.20, NOT the overridden 0.5
+        mock_ranger.is_obstacle_within.assert_called_with(pytest.approx(0.20))
+
+    def test_uses_static_min_distance_when_no_flight_state(self, mock_scf, event_queue, mocker):
+        # Backward-compat: no FlightState → use min_distance_m=0.3 directly
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=None, back=None, left=None, right=None, up=None
+        )
+        mock_ranger.is_obstacle_within.return_value = False
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+
+        monitor = CollisionMonitor(mock_scf, event_queue, min_distance_m=0.3)
+        monitor._run_once()
+
+        mock_ranger.is_obstacle_within.assert_called_with(pytest.approx(0.3))

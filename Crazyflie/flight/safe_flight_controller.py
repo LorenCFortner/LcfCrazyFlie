@@ -8,8 +8,18 @@ This means a CollisionMonitor or StabilizerMonitor can interrupt the drone
 mid-move within one poll cycle rather than waiting for the current blocking
 call to return.
 
+When a FlightState is provided, the current velocity is written to it before
+each linear movement step so CollisionMonitor can compute a velocity-appropriate
+detection threshold. The FlightState is NOT updated during the 180° pivot in
+run_out_and_back because the pivot velocity is in deg/s, not m/s.
+
+A ValueError is raised if any linear step's velocity exceeds
+MAX_SAFE_VELOCITY_M_S (imported from collision_monitor). Turn commands are
+exempt because their velocity is in deg/s.
+
 Example:
-    >>> controller = SafeFlightController(OUT_AND_BACK_PATH)
+    >>> state = FlightState()
+    >>> controller = SafeFlightController(OUT_AND_BACK_PATH, flight_state=state)
     >>> with MotionCommander(scf) as mc:
     ...     controller.run_out_and_back(
     ...         mc,
@@ -20,12 +30,17 @@ Example:
     ...     )
 """
 
+import logging
 import time
 from collections.abc import Callable
 
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.flight.path_runner import FlightStep
+from Crazyflie.safety.collision_monitor import MAX_SAFE_VELOCITY_M_S
+from Crazyflie.state.flight_state import FlightState
+
+logger = logging.getLogger(__name__)
 
 _POLL_S: float = 0.05  # 20 Hz abort polling
 
@@ -68,6 +83,8 @@ _START_METHOD: dict[str, str] = {
 _PIVOT_RATE_DEG_PER_S: float = 90.0
 _PIVOT_DEGREES: float = 180.0
 
+_TURN_COMMANDS: frozenset[str] = frozenset({"turn_left", "turn_right"})
+
 
 class SafeFlightController:
     """Executes FlightSteps with interruptible, non-blocking movements.
@@ -75,19 +92,30 @@ class SafeFlightController:
     Uses start_*/stop MotionCommander calls and polls should_abort every
     50 ms so monitors can interrupt mid-move, not only between steps.
 
+    When a FlightState is provided, the current velocity is written to it
+    before each linear step so CollisionMonitor can adjust its threshold
+    dynamically. The pivot in run_out_and_back never updates FlightState.
+
     The API mirrors PathRunner so scripts can swap between them:
         run(mc, should_abort)
         run_out_and_back(mc, should_abort)
         run_reversed(mc, should_abort)
     """
 
-    def __init__(self, steps: list[FlightStep]) -> None:
-        """Initialize with a list of FlightSteps.
+    def __init__(
+        self,
+        steps: list[FlightStep],
+        flight_state: FlightState | None = None,
+    ) -> None:
+        """Initialize with a list of FlightSteps and optional shared state.
 
         Args:
             steps: Ordered list of flight steps to execute.
+            flight_state: Optional shared state. When provided, the current
+                velocity is written before each linear movement step.
         """
         self._steps = steps
+        self._state = flight_state
 
     def run(
         self,
@@ -100,11 +128,16 @@ class SafeFlightController:
             mc: Active MotionCommander instance.
             should_abort: Optional callable checked before each step and every
                           50 ms during movement and settle. Return True to stop.
+
+        Raises:
+            ValueError: If any step's linear velocity exceeds MAX_SAFE_VELOCITY_M_S.
         """
         for step in self._steps:
             if should_abort and should_abort():
                 return
-            aborted = self._execute(mc, step.command, step.distance_m, step.velocity, should_abort)
+            aborted = self._execute(
+                mc, step.command, step.distance_m, step.velocity, should_abort, self._state
+            )
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -122,15 +155,23 @@ class SafeFlightController:
         turn_left↔turn_right swapped. All movements and the pivot are
         interruptible.
 
+        The FlightState is NOT updated during the 180° pivot because the
+        pivot velocity is in deg/s, not m/s.
+
         Args:
             mc: Active MotionCommander instance.
             should_abort: Optional callable checked every 50 ms.
+
+        Raises:
+            ValueError: If any step's linear velocity exceeds MAX_SAFE_VELOCITY_M_S.
         """
         # Outbound leg
         for step in self._steps:
             if should_abort and should_abort():
                 return
-            aborted = self._execute(mc, step.command, step.distance_m, step.velocity, should_abort)
+            aborted = self._execute(
+                mc, step.command, step.distance_m, step.velocity, should_abort, self._state
+            )
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -140,7 +181,7 @@ class SafeFlightController:
         if should_abort and should_abort():
             return
 
-        # 180° interruptible pivot to face home
+        # 180° interruptible pivot to face home — no FlightState update (deg/s, not m/s)
         aborted = self._execute(
             mc, "turn_right", _PIVOT_DEGREES, _PIVOT_RATE_DEG_PER_S, should_abort
         )
@@ -152,7 +193,9 @@ class SafeFlightController:
             if should_abort and should_abort():
                 return
             inverted = _TURN_AROUND_INVERSION.get(step.command, step.command)
-            aborted = self._execute(mc, inverted, step.distance_m, step.velocity, should_abort)
+            aborted = self._execute(
+                mc, inverted, step.distance_m, step.velocity, should_abort, self._state
+            )
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -171,12 +214,17 @@ class SafeFlightController:
         Args:
             mc: Active MotionCommander instance.
             should_abort: Optional callable checked every 50 ms.
+
+        Raises:
+            ValueError: If any step's linear velocity exceeds MAX_SAFE_VELOCITY_M_S.
         """
         for step in reversed(self._steps):
             if should_abort and should_abort():
                 return
             inverted = _REVERSE_DIRECTION.get(step.command, step.command)
-            aborted = self._execute(mc, inverted, step.distance_m, step.velocity, should_abort)
+            aborted = self._execute(
+                mc, inverted, step.distance_m, step.velocity, should_abort, self._state
+            )
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -190,6 +238,7 @@ class SafeFlightController:
         distance_m: float,
         velocity: float,
         should_abort: Callable[[], bool] | None,
+        flight_state: FlightState | None = None,
     ) -> bool:
         """Start a movement, poll for abort every 50 ms, then stop.
 
@@ -199,10 +248,32 @@ class SafeFlightController:
             distance_m: Distance in metres (or degrees for turns).
             velocity: Speed in m/s (or deg/s for turns).
             should_abort: Callable returning True to abort mid-move.
+            flight_state: Optional shared state; updated before movement starts
+                for linear commands. Never updated for turn commands.
 
         Returns:
             True if the move was aborted early, False if it completed.
+
+        Raises:
+            ValueError: If velocity exceeds MAX_SAFE_VELOCITY_M_S for linear
+                commands. Turn commands are exempt (velocity is in deg/s).
         """
+        is_turn = command in _TURN_COMMANDS
+
+        if not is_turn and velocity > MAX_SAFE_VELOCITY_M_S:
+            logger.error(
+                "Step velocity %.3f m/s exceeds MAX_SAFE_VELOCITY_M_S (%.3f m/s) — aborting",
+                velocity,
+                MAX_SAFE_VELOCITY_M_S,
+            )
+            raise ValueError(
+                f"Step velocity {velocity:.3f} m/s exceeds maximum safe velocity "
+                f"{MAX_SAFE_VELOCITY_M_S:.3f} m/s"
+            )
+
+        if flight_state is not None and not is_turn:
+            flight_state.set_velocity(velocity)
+
         start_method = _START_METHOD.get(command)
         if start_method is None:
             return False

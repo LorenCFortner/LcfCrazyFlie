@@ -3,6 +3,10 @@
 Uses SafeFlightController so CollisionMonitor and StabilizerMonitor can
 interrupt any movement mid-execution (every 50 ms), not only between steps.
 
+A shared FlightState is passed to both SafeFlightController and
+CollisionMonitor so the detection threshold scales automatically with the
+velocity of each flight step.
+
 Pre-flight:
   1. Clearance check — aborts if any direction is within 0.3 m.
   2. LED headlights on.
@@ -27,6 +31,7 @@ from Crazyflie.safety.clearance_check import check_preflight_clearance
 from Crazyflie.safety.collision_monitor import CollisionMonitor
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
 from Crazyflie.safety.takeoff_verifier import verify_takeoff
+from Crazyflie.state.flight_state import FlightState
 from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
 logger = logging.getLogger(__name__)
@@ -125,7 +130,8 @@ def main() -> None:
     cflib.crtp.init_drivers(enable_debug_driver=False)
 
     event_queue: queue.Queue[str] = queue.Queue()
-    controller = SafeFlightController(OUT_AND_BACK_PATH)
+    flight_state = FlightState()
+    controller = SafeFlightController(OUT_AND_BACK_PATH, flight_state=flight_state)
 
     logger.info(f"Connecting to {URI}...")
 
@@ -147,7 +153,7 @@ def main() -> None:
         stabilizer_monitor = StabilizerMonitor(scf, event_queue)
         stabilizer_monitor.start()
 
-        collision_monitor = CollisionMonitor(scf, event_queue)
+        collision_monitor = CollisionMonitor(scf, event_queue, flight_state=flight_state)
 
         # Give stabilizer monitor one poll cycle to read initial telemetry.
         time.sleep(0.15)

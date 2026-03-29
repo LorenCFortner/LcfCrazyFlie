@@ -10,6 +10,8 @@ import pytest
 
 from Crazyflie.flight.path_runner import FlightStep
 from Crazyflie.flight.safe_flight_controller import SafeFlightController
+from Crazyflie.safety.collision_monitor import MAX_SAFE_VELOCITY_M_S
+from Crazyflie.state.flight_state import FlightState
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -391,3 +393,118 @@ class TestRunReversed:
             single_step("forward").run_reversed(mock_mc, should_abort=always_abort)
 
         mock_mc.start_back.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# FlightState — velocity written before each step
+# ---------------------------------------------------------------------------
+
+
+class TestFlightStateVelocityPropagation:
+    def test_sets_velocity_on_flight_state_before_step(self, mock_mc, mocker):
+        state = FlightState()
+        spy = mocker.spy(state, "set_velocity")
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        spy.assert_called_once_with(0.3)
+
+    def test_sets_velocity_for_each_step_in_order(self, mock_mc, mocker):
+        state = FlightState()
+        spy = mocker.spy(state, "set_velocity")
+        controller = SafeFlightController(
+            [
+                FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0),
+                FlightStep("left", 0.5, velocity=0.5, settle_s=0.0),
+            ],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        assert spy.call_count == 2
+        assert spy.call_args_list[0].args[0] == pytest.approx(0.3)
+        assert spy.call_args_list[1].args[0] == pytest.approx(0.5)
+
+    def test_flight_state_not_updated_during_pivot(self, mock_mc, mocker):
+        """Pivot uses deg/s — FlightState must not be updated during the turn."""
+        state = FlightState()
+        spy = mocker.spy(state, "set_velocity")
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run_out_and_back(mock_mc, should_abort=never_abort)
+
+        # 1 outbound step + 1 return step = 2 calls; pivot contributes none
+        assert spy.call_count == 2
+        for call in spy.call_args_list:
+            assert call.args[0] == pytest.approx(0.3)
+
+    def test_no_flight_state_runs_normally(self, mock_mc):
+        """Without FlightState the controller behaves identically to before."""
+        controller = SafeFlightController([FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)])
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        mock_mc.start_forward.assert_called_once_with(0.3)
+
+
+# ---------------------------------------------------------------------------
+# Max velocity enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestMaxVelocityEnforcement:
+    def test_raises_value_error_when_velocity_exceeds_max(self, mock_mc):
+        too_fast = MAX_SAFE_VELOCITY_M_S + 0.1
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=too_fast, settle_s=0.0)]
+        )
+
+        with pytest.raises(ValueError, match="exceeds maximum safe velocity"):
+            with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+                controller.run(mock_mc)
+
+    def test_velocity_at_exact_max_does_not_raise(self, mock_mc):
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=MAX_SAFE_VELOCITY_M_S, settle_s=0.0)]
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)  # must not raise
+
+        mock_mc.start_forward.assert_called_once()
+
+    def test_max_velocity_not_applied_to_turns(self, mock_mc):
+        # Turn velocity is in deg/s — the m/s cap must not apply
+        controller = SafeFlightController(
+            [FlightStep("turn_right", 90.0, velocity=90.0, settle_s=0.0)]
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)  # must not raise
+
+        mock_mc.start_turn_right.assert_called_once()
+
+    def test_error_raised_before_movement_starts(self, mock_mc):
+        """ValueError must fire before start_forward is ever called."""
+        too_fast = MAX_SAFE_VELOCITY_M_S + 0.5
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=too_fast, settle_s=0.0)]
+        )
+
+        with pytest.raises(ValueError):
+            with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+                controller.run(mock_mc)
+
+        mock_mc.start_forward.assert_not_called()

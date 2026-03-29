@@ -404,8 +404,8 @@ class TestComputeThreshold:
         assert CollisionMonitor._compute_threshold(MAX_SAFE_VELOCITY_M_S) == pytest.approx(0.35)
 
     def test_high_velocity_returns_velocity_times_reaction(self):
-        # 2.0 * 0.20 = 0.40 > 0.35 → returns 0.40
-        assert CollisionMonitor._compute_threshold(2.0) == pytest.approx(0.40)
+        # 2.0 * 0.30 = 0.60 > 0.35 → returns 0.60
+        assert CollisionMonitor._compute_threshold(2.0) == pytest.approx(0.60)
 
     def test_threshold_grows_with_velocity(self):
         low = CollisionMonitor._compute_threshold(0.5)
@@ -456,7 +456,7 @@ class TestDynamicAvoidance:
         assert distance_arg == pytest.approx(0.20)
 
     def test_avoidance_distance_scales_at_high_speed(self, mock_scf, event_queue, mocker):
-        # 2.0 m/s * 0.20 = 0.40 > base 0.35 → avoid_distance = 0.40
+        # 2.0 m/s * 0.30 = 0.60 > base 0.35 → avoid_distance = 0.60
         monitor, mock_ranger = self._make_monitor_with_state(
             mock_scf, event_queue, mocker, velocity=2.0
         )
@@ -467,7 +467,7 @@ class TestDynamicAvoidance:
 
         mock_mc.back.assert_called_once()
         distance_arg = mock_mc.back.call_args[0][0]
-        assert distance_arg == pytest.approx(0.40)
+        assert distance_arg == pytest.approx(0.60)
 
     def test_avoidance_velocity_is_two_times_flight_speed(self, mock_scf, event_queue, mocker):
         # flight at 0.5 m/s → avoidance at 1.0 m/s
@@ -506,7 +506,7 @@ class TestFlightStateDynamicThreshold:
     def test_uses_computed_threshold_when_flight_state_provided(
         self, mock_scf, event_queue, mocker
     ):
-        # Flight at 2.0 m/s → threshold = max(0.35, 2.0*0.20) = 0.40
+        # Flight at 2.0 m/s → threshold = max(0.35, 2.0*0.30) = 0.60
         mock_ranger = mocker.MagicMock()
         mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
         mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
@@ -522,7 +522,7 @@ class TestFlightStateDynamicThreshold:
         monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
         monitor._run_once()
 
-        mock_ranger.is_obstacle_within.assert_called_with(pytest.approx(0.40))
+        mock_ranger.is_obstacle_within.assert_called_with(pytest.approx(0.60))
 
     def test_ignores_min_distance_m_when_flight_state_provided(
         self, mock_scf, event_queue, mocker

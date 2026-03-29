@@ -46,17 +46,18 @@ from Crazyflie.state.flight_state import FlightState
 logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_DISTANCE_M: float = 0.2  # kept for backward compat and clearance_check
-_POLL_INTERVAL_S: float = 0.05  # 20 Hz
+_POLL_INTERVAL_S: float = 0.10  # 10 Hz — matches Multi-ranger sensor refresh rate
 
 # Velocity-dependent threshold formula: max(_BASE_DETECTION_M, velocity * _REACTION_S)
-_REACTION_S: float = 0.20  # tuning constant — calibrate empirically
+_REACTION_S: float = 0.30  # reaction-time budget: 100 ms sensor latency + 100 ms poll
+# cycle + ~100 ms deceleration = ~300 ms total at 10 Hz polling
 _BASE_DETECTION_M: float = 0.35  # floor detection distance (empirically tuned: ranger
 # updates at ~10 Hz and the drone coasts ~80 mm before mc.stop() takes effect at 0.3 m/s)
 _BASE_AVOID_M: float = 0.20  # floor avoidance reversal distance
 
 # Theoretical cap: velocity at which the formula equals the base floor.
 # Above this speed the drone cannot reliably stop in time with current tuning.
-MAX_SAFE_VELOCITY_M_S: float = _BASE_DETECTION_M / _REACTION_S  # = 1.75 m/s
+MAX_SAFE_VELOCITY_M_S: float = _BASE_DETECTION_M / _REACTION_S  # ≈ 1.17 m/s
 
 # Fallback avoidance velocity used when no FlightState is provided.
 # Preserves the original hardcoded behavior for backward compatibility.

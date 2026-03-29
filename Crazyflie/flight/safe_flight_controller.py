@@ -2,7 +2,7 @@
 
 Mirrors the PathRunner API but uses non-blocking MotionCommander calls
 (start_forward / start_back / etc.) so that should_abort is checked every
-50 ms during movement, not only between steps.
+100 ms during movement, not only between steps.
 
 This means a CollisionMonitor or StabilizerMonitor can interrupt the drone
 mid-move within one poll cycle rather than waiting for the current blocking
@@ -42,7 +42,7 @@ from Crazyflie.state.flight_state import FlightState
 
 logger = logging.getLogger(__name__)
 
-_POLL_S: float = 0.05  # 20 Hz abort polling
+_POLL_S: float = 0.10  # 10 Hz abort polling — matches Multi-ranger sensor refresh rate
 
 _REVERSE_DIRECTION: dict[str, str] = {
     "forward": "back",

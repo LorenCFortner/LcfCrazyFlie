@@ -1,0 +1,14 @@
+{
+    "cSpell.words": [
+        "cflib",
+        "crazyflie",
+        "mypy",
+        "pytest",
+        "bitcraze",
+        "crtp",
+        "multiranger",
+        "syncCrazyflie",
+        "ruff",
+        "uv"
+    ]
+}

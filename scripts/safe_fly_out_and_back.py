@@ -120,6 +120,7 @@ def main() -> None:
     logging.basicConfig(level=logging.ERROR)
     logging.getLogger("cflib").setLevel(logging.CRITICAL)
     logging.getLogger(__name__).setLevel(logging.INFO)
+    logging.getLogger("Crazyflie").setLevel(logging.WARNING)
 
     cflib.crtp.init_drivers(enable_debug_driver=False)
 
@@ -147,9 +148,8 @@ def main() -> None:
         stabilizer_monitor.start()
 
         collision_monitor = CollisionMonitor(scf, event_queue)
-        collision_monitor.start()
 
-        # Give monitors one poll cycle to read initial telemetry.
+        # Give stabilizer monitor one poll cycle to read initial telemetry.
         time.sleep(0.15)
         initial_battery_v = stabilizer_monitor.state.battery_v
         initial_height_mm = stabilizer_monitor.state.height_mm
@@ -162,6 +162,10 @@ def main() -> None:
 
         try:
             with MotionCommander(scf) as mc:
+                # Start collision monitoring only once airborne — clearance check
+                # already guards pre-takeoff proximity, and ground-level sensor
+                # readings fluctuate and can spuriously trigger a COLLISION event.
+                collision_monitor.start()
                 collision_monitor.attach_motion_commander(mc)
                 logger.info("Airborne — stabilizing for 3 seconds...")
                 for i in range(3):

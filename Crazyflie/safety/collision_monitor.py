@@ -34,10 +34,10 @@ from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MIN_DISTANCE_M: float = 0.1
+DEFAULT_MIN_DISTANCE_M: float = 0.2  # 20 cm — gives ~14 cm margin after stopping at 0.3 m/s
 _POLL_INTERVAL_S: float = 0.05  # 20 Hz
 _AVOID_DISTANCE_M: float = 0.2  # how far to back away from the obstacle
-_AVOID_VELOCITY: float = 0.3  # m/s during avoidance move
+_AVOID_VELOCITY: float = 0.6  # m/s during avoidance move (2× flight speed for snappy reversal)
 
 
 def find_avoidance_move(
@@ -230,7 +230,7 @@ class CollisionMonitor:
 
     def _run(self) -> None:
         """Background thread: polls Multi-ranger and reacts to obstacles."""
-        warn_threshold = self._min_distance_m * 3.0  # warn at 3x trigger distance
+        warn_threshold = self._min_distance_m * 1.5  # warn at 1.5x trigger distance
         with MultiRangerDeck(self._scf) as ranger:
             while not self._stop_requested:
                 readings = ranger.get_readings()

@@ -49,9 +49,9 @@ DEFAULT_MIN_DISTANCE_M: float = 0.2  # kept for backward compat and clearance_ch
 _POLL_INTERVAL_S: float = 0.10  # 10 Hz — matches Multi-ranger sensor refresh rate
 
 # Velocity-dependent threshold formula: max(_BASE_DETECTION_M, velocity * _REACTION_S)
-_REACTION_S: float = 0.60  # detection threshold scaling factor; formula activates above
-# ~0.42 m/s (BASE/REACTION_S crossover); chosen so at 0.6 m/s threshold = 0.36 m (vs
-# 0.25 m base), absorbing one extra poll-cycle of travel (~60 mm) at that speed
+_REACTION_S: float = 0.65  # detection threshold scaling factor; formula activates above
+# ~0.38 m/s (BASE/REACTION_S crossover); at 0.6 m/s → 0.39 m, at 0.83 m/s → 0.54 m,
+# sized to absorb one poll-cycle of travel plus stopping distance at max speed
 _BASE_DETECTION_M: float = 0.25  # floor detection distance (empirically tuned: trigger at
 # ~0.23 m + ~80 mm coast = ~0.15 m stopping distance at 0.3 m/s)
 _BASE_AVOID_M: float = 0.20  # floor avoidance reversal distance

@@ -400,12 +400,12 @@ class TestComputeThreshold:
         assert CollisionMonitor._compute_threshold(0.1) == pytest.approx(0.25)
 
     def test_formula_scales_above_crossover(self):
-        # Crossover ≈ 0.42 m/s; at 0.6 m/s: 0.6 * 0.60 = 0.36 > 0.25 → formula kicks in
-        assert CollisionMonitor._compute_threshold(0.6) == pytest.approx(0.36)
+        # Crossover ≈ 0.38 m/s; at 0.6 m/s: 0.6 * 0.65 = 0.39 > 0.25 → formula kicks in
+        assert CollisionMonitor._compute_threshold(0.6) == pytest.approx(0.39)
 
     def test_high_velocity_returns_velocity_times_reaction(self):
-        # 2.0 * 0.60 = 1.20 > 0.25 → returns 1.20
-        assert CollisionMonitor._compute_threshold(2.0) == pytest.approx(1.20)
+        # 2.0 * 0.65 = 1.30 > 0.25 → returns 1.30
+        assert CollisionMonitor._compute_threshold(2.0) == pytest.approx(1.30)
 
     def test_threshold_grows_with_velocity(self):
         low = CollisionMonitor._compute_threshold(0.5)
@@ -707,8 +707,8 @@ class TestRunOnceDirectionalThreshold:
         assert monitor.is_triggered() is True
 
     def test_flight_dir_sensor_uses_dynamic_threshold(self, mock_scf, event_queue, mocker):
-        # Moving forward at 0.6 m/s; dynamic threshold = 0.36 (0.6 * 0.60 > 0.25 base)
-        # front sensor at 0.30 m < 0.36 → must trigger
+        # Moving forward at 0.6 m/s; dynamic threshold = 0.39 (0.6 * 0.65 > 0.25 base)
+        # front sensor at 0.30 m < 0.39 → must trigger
         readings = MultiRangerReadings(front=0.30, back=None, left=None, right=None, up=None)
         monitor, _ = self._make_monitor_with_direction(
             mock_scf, event_queue, mocker, velocity=0.6, direction="forward", readings=readings
@@ -721,8 +721,8 @@ class TestRunOnceDirectionalThreshold:
     def test_flight_dir_sensor_no_trigger_when_above_dynamic_threshold(
         self, mock_scf, event_queue, mocker
     ):
-        # Moving forward at 0.6 m/s; dynamic threshold = 0.36 (0.6 * 0.60 > 0.25 base)
-        # front sensor at 0.40 m > 0.36 → must NOT trigger
+        # Moving forward at 0.6 m/s; dynamic threshold = 0.39 (0.6 * 0.65 > 0.25 base)
+        # front sensor at 0.40 m > 0.39 → must NOT trigger
         readings = MultiRangerReadings(front=0.40, back=None, left=None, right=None, up=None)
         monitor, _ = self._make_monitor_with_direction(
             mock_scf, event_queue, mocker, velocity=0.6, direction="forward", readings=readings

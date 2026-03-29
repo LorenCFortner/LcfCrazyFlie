@@ -33,6 +33,7 @@ Example:
 """
 
 import logging
+import math
 import queue
 import threading
 import time
@@ -78,6 +79,22 @@ _FLIGHT_DIR_TO_SENSOR: dict[str, str] = {
     "left": "left",
     "right": "right",
     "up": "up",
+}
+
+# Diagonal collision detection constants.
+# The blade centre-to-tip radius is 7 cm; minimum clearance from tip is 5 cm,
+# giving 12 cm total from drone centre to any obstacle at the 45° blade angle.
+_SENSOR_OFFSET_M: float = 0.017  # centre-to-sensor-face distance (1.7 cm)
+_DIAGONAL_BASE_M: float = 0.12  # blade radius (7 cm) + tip clearance (5 cm)
+
+# Maps horizontal flight directions to their two diagonal adjacent sensor pairs.
+# "up" is absent — blades are horizontal so there is no diagonal blade sweep
+# into vertical space. None direction is also absent (hover: no approach velocity).
+_DIAGONAL_PAIRS: dict[str, list[tuple[str, str]]] = {
+    "forward": [("front", "left"), ("front", "right")],
+    "back": [("back", "left"), ("back", "right")],
+    "left": [("left", "front"), ("left", "back")],
+    "right": [("right", "front"), ("right", "back")],
 }
 
 
@@ -149,6 +166,28 @@ def _log_all_readings(
         _fmt(readings.right),
         _fmt(readings.up),
     )
+
+
+def _diagonal_distance(a: float | None, b: float | None) -> float | None:
+    """Pythagorean distance from drone centre for a sensor pair.
+
+    Adds _SENSOR_OFFSET_M to each raw reading before computing the hypotenuse,
+    converting from sensor-face distance to drone-centre distance.
+
+    Returns None when either reading is None or <= 0 (sensor not detecting or
+    touching the face), since the distance would be meaningless.
+
+    Args:
+        a: First sensor reading in metres (distance from sensor face).
+        b: Second sensor reading in metres (distance from sensor face).
+
+    Returns:
+        Pythagorean distance from drone centre in metres, or None for invalid
+        input.
+    """
+    if a is None or a <= 0.0 or b is None or b <= 0.0:
+        return None
+    return math.sqrt((a + _SENSOR_OFFSET_M) ** 2 + (b + _SENSOR_OFFSET_M) ** 2)
 
 
 class CollisionMonitor:
@@ -286,6 +325,71 @@ class CollisionMonitor:
             return self._flight_state.get_direction()
         return None
 
+    def _effective_diagonal_threshold(self) -> float:
+        """Return the diagonal detection threshold for the current poll cycle.
+
+        Uses an additive formula so the threshold is always larger than the
+        leading sensor's direct threshold:
+
+            threshold = _DIAGONAL_BASE_M + _compute_threshold(velocity)
+
+        This ensures that when the drone stops (consuming the reaction distance),
+        the remaining distance to a diagonal corner equals _DIAGONAL_BASE_M (12 cm),
+        which is the blade radius (7 cm) plus the required 5 cm tip clearance.
+
+        Returns:
+            Diagonal detection threshold in metres.
+        """
+        velocity = self._flight_state.get_velocity() if self._flight_state is not None else 0.0
+        return _DIAGONAL_BASE_M + self._compute_threshold(velocity)
+
+    def _diagonal_detected(self, readings: MultiRangerReadings) -> bool:
+        """Return True if any diagonal sensor pair is within the diagonal threshold.
+
+        Checks the two pairs of (leading sensor, adjacent sensor) for the current
+        flight direction using Pythagorean distance from drone centre.  Only active
+        for horizontal flight directions (forward/back/left/right).  Excluded for
+        "up" (blades are horizontal) and None direction (no approach velocity).
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if any diagonal pair indicates a nearby obstacle.
+        """
+        direction = self._effective_flight_direction()
+        if direction not in _DIAGONAL_PAIRS:
+            return False
+        threshold = self._effective_diagonal_threshold()
+        for sensor_a, sensor_b in _DIAGONAL_PAIRS[direction]:
+            a = getattr(readings, sensor_a)
+            b = getattr(readings, sensor_b)
+            dist = _diagonal_distance(a, b)
+            if dist is not None and dist < threshold:
+                return True
+        return False
+
+    def _diagonal_warn_detected(self, readings: MultiRangerReadings) -> bool:
+        """Return True if any diagonal pair is within 1.5× the diagonal threshold.
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if any diagonal pair is within its warning distance.
+        """
+        direction = self._effective_flight_direction()
+        if direction not in _DIAGONAL_PAIRS:
+            return False
+        warn_threshold = self._effective_diagonal_threshold() * 1.5
+        for sensor_a, sensor_b in _DIAGONAL_PAIRS[direction]:
+            a = getattr(readings, sensor_a)
+            b = getattr(readings, sensor_b)
+            dist = _diagonal_distance(a, b)
+            if dist is not None and dist < warn_threshold:
+                return True
+        return False
+
     def _obstacle_detected(self, readings: MultiRangerReadings) -> bool:
         """Return True if any sensor reading exceeds its threshold.
 
@@ -338,7 +442,7 @@ class CollisionMonitor:
             )
             if value < warn_threshold:
                 return True
-        return False
+        return self._diagonal_warn_detected(readings)
 
     def _trigger(self, ranger: MultiRangerDeck) -> None:
         """Fire the collision response if not already triggered.
@@ -404,6 +508,8 @@ class CollisionMonitor:
                 readings = ranger.get_readings()
                 if self._obstacle_detected(readings):
                     self._trigger(ranger)
+                elif not self._triggered and self._diagonal_detected(readings):
+                    self._trigger(ranger)
 
     def _run(self) -> None:
         """Background thread: polls Multi-ranger and reacts to obstacles.
@@ -429,6 +535,8 @@ class CollisionMonitor:
                     readings = ranger.get_readings()
                     obstacle_detected = self._obstacle_detected(readings)
                     if not self._triggered and obstacle_detected:
+                        self._trigger(ranger)
+                    elif not self._triggered and self._diagonal_detected(readings):
                         self._trigger(ranger)
                     elif not self._triggered and self._warn_detected(readings):
                         _log_all_readings("Obstacle approaching", readings, threshold)

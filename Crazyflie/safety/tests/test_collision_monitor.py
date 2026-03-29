@@ -3,6 +3,7 @@
 Written test-first following the TDD rules for this project.
 """
 
+import math
 import queue
 from typing import Any
 
@@ -10,9 +11,12 @@ import pytest
 
 from Crazyflie.decks.multi_ranger import MultiRangerReadings
 from Crazyflie.safety.collision_monitor import (
+    _DIAGONAL_BASE_M,
+    _SENSOR_OFFSET_M,
     _SIDE_CLEARANCE_M,
     DEFAULT_MIN_DISTANCE_M,
     CollisionMonitor,
+    _diagonal_distance,
     find_avoidance_move,
 )
 from Crazyflie.state.flight_state import FlightState
@@ -814,4 +818,314 @@ class TestWarnDetected:
         # Moving forward; left=0.12 m < 0.15 → warns.
         monitor = self._make_monitor(mock_scf, event_queue, velocity=0.3, direction="forward")
         readings = _readings(left=0.12)
+        assert monitor._warn_detected(readings) is True
+
+
+# ---------------------------------------------------------------------------
+# _diagonal_distance — module-level helper
+# ---------------------------------------------------------------------------
+
+
+class TestDiagonalDistance:
+    def test_returns_hypotenuse_with_sensor_offset_applied(self):
+        # Both readings 0.083 m; offset 0.017 → effective (0.1, 0.1)
+        # hypotenuse = sqrt(0.1² + 0.1²) = sqrt(0.02) ≈ 0.14142
+        result = _diagonal_distance(0.083, 0.083)
+        expected = math.sqrt(2) * (0.083 + _SENSOR_OFFSET_M)
+        assert result == pytest.approx(expected)
+
+    def test_sensor_offset_increases_distance_compared_to_raw_readings(self):
+        # Without offset: sqrt(0.1² + 0.1²) ≈ 0.1414
+        # With offset: sqrt(0.117² + 0.117²) ≈ 0.1655
+        result = _diagonal_distance(0.1, 0.1)
+        raw = math.sqrt(0.1**2 + 0.1**2)
+        assert result is not None
+        assert result > raw
+
+    def test_asymmetric_readings_use_correct_formula(self):
+        a, b = 0.30, 0.20
+        expected = math.sqrt((a + _SENSOR_OFFSET_M) ** 2 + (b + _SENSOR_OFFSET_M) ** 2)
+        assert _diagonal_distance(a, b) == pytest.approx(expected)
+
+    def test_returns_none_when_first_reading_is_none(self):
+        assert _diagonal_distance(None, 0.1) is None
+
+    def test_returns_none_when_second_reading_is_none(self):
+        assert _diagonal_distance(0.1, None) is None
+
+    def test_returns_none_when_both_readings_are_none(self):
+        assert _diagonal_distance(None, None) is None
+
+    def test_returns_none_when_first_reading_is_zero(self):
+        assert _diagonal_distance(0.0, 0.1) is None
+
+    def test_returns_none_when_second_reading_is_zero(self):
+        assert _diagonal_distance(0.1, 0.0) is None
+
+    def test_returns_none_when_first_reading_is_negative(self):
+        assert _diagonal_distance(-0.01, 0.1) is None
+
+    def test_returns_none_when_second_reading_is_negative(self):
+        assert _diagonal_distance(0.1, -0.05) is None
+
+    def test_diagonal_base_constant_is_blade_radius_plus_clearance(self):
+        # 7 cm blade radius + 5 cm tip clearance = 12 cm
+        assert _DIAGONAL_BASE_M == pytest.approx(0.12)
+
+    def test_sensor_offset_constant_is_1_7cm(self):
+        assert _SENSOR_OFFSET_M == pytest.approx(0.017)
+
+
+# ---------------------------------------------------------------------------
+# _diagonal_detected — directional Pythagorean check
+# ---------------------------------------------------------------------------
+
+
+class TestDiagonalDetected:
+    """CollisionMonitor._diagonal_detected uses paired sensor Pythagorean distance."""
+
+    def _make_monitor(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        velocity: float,
+        direction: str | None,
+    ) -> CollisionMonitor:
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        return CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+    def test_returns_true_when_front_right_pair_below_threshold(self, mock_scf, event_queue):
+        # v=0.83 m/s; diagonal threshold = 0.12 + max(0.25, 0.83×0.65) = 0.12+0.54 = 0.66 m
+        # front=0.55 (above direct 0.54 → no direct trigger)
+        # right=0.25 (above side 0.10 → no direct trigger)
+        # diagonal: sqrt(0.567²+0.267²) ≈ 0.627 < 0.66 → diagonal fires
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.55, right=0.25)
+        assert monitor._diagonal_detected(readings) is True
+
+    def test_returns_true_when_front_left_pair_below_threshold(self, mock_scf, event_queue):
+        # Same as above but using front+left pair
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.55, left=0.25)
+        assert monitor._diagonal_detected(readings) is True
+
+    def test_returns_false_when_both_pairs_above_threshold(self, mock_scf, event_queue):
+        # front=0.65, left=0.65, right=0.65
+        # sqrt((0.667)²+(0.667)²) ≈ 0.943 > 0.66 → False
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.65, left=0.65, right=0.65)
+        assert monitor._diagonal_detected(readings) is False
+
+    def test_returns_false_for_up_direction(self, mock_scf, event_queue):
+        # "up" has no diagonal pairs — blades are horizontal
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "up")
+        readings = _readings(front=0.05, back=0.05, left=0.05, right=0.05, up=0.55)
+        assert monitor._diagonal_detected(readings) is False
+
+    def test_returns_false_for_none_direction(self, mock_scf, event_queue):
+        # No active direction — no diagonal check
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, None)
+        readings = _readings(front=0.55, right=0.25)
+        assert monitor._diagonal_detected(readings) is False
+
+    def test_returns_false_when_all_readings_are_none(self, mock_scf, event_queue):
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings()
+        assert monitor._diagonal_detected(readings) is False
+
+    def test_returns_false_when_only_one_sensor_in_pair_has_reading(self, mock_scf, event_queue):
+        # front=0.55 but right=None → _diagonal_distance returns None → no fire
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.55, right=None, left=None)
+        assert monitor._diagonal_detected(readings) is False
+
+    @pytest.mark.parametrize(
+        "direction,leading,adj_field",
+        [
+            ("forward", "front", "right"),
+            ("forward", "front", "left"),
+            ("back", "back", "right"),
+            ("back", "back", "left"),
+            ("left", "left", "front"),
+            ("left", "left", "back"),
+            ("right", "right", "front"),
+            ("right", "right", "back"),
+        ],
+    )
+    def test_each_direction_checks_correct_adjacent_pairs(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        direction: str,
+        leading: str,
+        adj_field: str,
+    ) -> None:
+        # leading=0.55, adjacent=0.25 → diagonal fires at v=0.83
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, direction)
+        kwargs: dict[str, float] = {leading: 0.55, adj_field: 0.25}
+        readings = _readings(**kwargs)
+        assert monitor._diagonal_detected(readings) is True
+
+
+# ---------------------------------------------------------------------------
+# _diagonal_warn_detected — 1.5× diagonal threshold warning
+# ---------------------------------------------------------------------------
+
+
+class TestDiagonalWarnDetected:
+    """CollisionMonitor._diagonal_warn_detected uses 1.5× the diagonal threshold."""
+
+    def _make_monitor(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        velocity: float,
+        direction: str | None,
+    ) -> CollisionMonitor:
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        return CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+    def test_returns_true_when_diagonal_within_1_5x_threshold(self, mock_scf, event_queue):
+        # v=0.83; threshold=0.66 m; warn=0.99 m
+        # front=0.65, right=0.65: sqrt((0.667)²+(0.667)²) ≈ 0.943 < 0.99 → True
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.65, right=0.65)
+        assert monitor._diagonal_warn_detected(readings) is True
+
+    def test_returns_false_when_diagonal_above_1_5x_threshold(self, mock_scf, event_queue):
+        # front=0.70, right=0.70: sqrt((0.717)²+(0.717)²) ≈ 1.014 > 0.99 → False
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.70, right=0.70)
+        assert monitor._diagonal_warn_detected(readings) is False
+
+    def test_returns_false_for_up_direction(self, mock_scf, event_queue):
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "up")
+        readings = _readings(front=0.1, right=0.1)
+        assert monitor._diagonal_warn_detected(readings) is False
+
+    def test_returns_false_for_none_direction(self, mock_scf, event_queue):
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, None)
+        readings = _readings(front=0.65, right=0.65)
+        assert monitor._diagonal_warn_detected(readings) is False
+
+    def test_warn_fires_when_detect_does_not(self, mock_scf, event_queue):
+        # front=0.65, right=0.65: diagonal ≈ 0.943 > threshold(0.66) but < warn(0.99)
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.65, right=0.65)
+        assert monitor._diagonal_detected(readings) is False
+        assert monitor._diagonal_warn_detected(readings) is True
+
+
+# ---------------------------------------------------------------------------
+# _run_once diagonal integration — triggers when only diagonal fires
+# ---------------------------------------------------------------------------
+
+
+class TestRunOnceDiagonal:
+    """Diagonal check in _run_once fires COLLISION when individual checks do not."""
+
+    def _make_monitor_with_direction(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        velocity: float,
+        direction: str | None,
+        readings: MultiRangerReadings,
+    ) -> tuple[CollisionMonitor, Any]:
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = readings
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        return monitor, mock_ranger
+
+    def test_diagonal_triggers_when_individual_checks_pass(self, mock_scf, event_queue, mocker):
+        # v=0.83; direct leading=0.54 m, side=0.10 m
+        # front=0.55 > 0.54 → no direct. right=0.25 > 0.10 → no direct.
+        # diagonal: sqrt(0.567²+0.267²) ≈ 0.627 < 0.66 → diagonal fires
+        readings = MultiRangerReadings(front=0.55, back=None, left=None, right=0.25, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf,
+            event_queue,
+            mocker,
+            velocity=0.83,
+            direction="forward",
+            readings=readings,
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+        assert event_queue.get_nowait() == "COLLISION"
+
+    def test_diagonal_does_not_trigger_when_both_pairs_clear(self, mock_scf, event_queue, mocker):
+        # front=0.65, left=0.65, right=0.65 — diagonal ≈ 0.943 > 0.66 → no trigger
+        readings = MultiRangerReadings(front=0.65, back=None, left=0.65, right=0.65, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf,
+            event_queue,
+            mocker,
+            velocity=0.83,
+            direction="forward",
+            readings=readings,
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is False
+        assert event_queue.empty()
+
+    def test_diagonal_not_called_without_flight_state(self, mock_scf, event_queue, mocker):
+        # Backward-compat: no FlightState → diagonal path never reached
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.is_obstacle_within.return_value = False
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=0.55, back=None, left=None, right=0.25, up=None
+        )
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+
+        monitor = CollisionMonitor(mock_scf, event_queue)  # no flight_state
+        monitor._run_once()
+
+        assert monitor.is_triggered() is False
+
+    def test_up_direction_skips_diagonal_check(self, mock_scf, event_queue, mocker):
+        # All horizontal sensors close, but direction="up" → no diagonal pairs
+        # Direct check: front=0.05 < _SIDE_CLEARANCE_M=0.10 → that trips the DIRECT side check
+        # Use sensors above side clearance so no direct trigger either
+        readings = MultiRangerReadings(front=0.55, back=0.55, left=0.55, right=0.25, up=0.60)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf,
+            event_queue,
+            mocker,
+            velocity=0.83,
+            direction="up",
+            readings=readings,
+        )
+
+        monitor._run_once()
+
+        # up sensor at 0.60 > direct threshold 0.54 → no direct trigger.
+        # No diagonal pairs for "up" → no diagonal trigger.
+        assert monitor.is_triggered() is False
+
+    def test_warn_detected_includes_diagonal_warn(self, mock_scf, event_queue):
+        # front=0.65, right=0.65: diagonal ≈ 0.943 in warn zone [0.66, 0.99]
+        # _warn_detected should return True via the diagonal warn check
+        state = FlightState(current_velocity_m_s=0.83)
+        state.set_direction("forward")
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        readings = _readings(front=0.65, right=0.65)
         assert monitor._warn_detected(readings) is True

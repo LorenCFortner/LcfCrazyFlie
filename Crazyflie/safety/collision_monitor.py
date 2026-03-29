@@ -49,15 +49,18 @@ DEFAULT_MIN_DISTANCE_M: float = 0.2  # kept for backward compat and clearance_ch
 _POLL_INTERVAL_S: float = 0.10  # 10 Hz — matches Multi-ranger sensor refresh rate
 
 # Velocity-dependent threshold formula: max(_BASE_DETECTION_M, velocity * _REACTION_S)
-_REACTION_S: float = 0.30  # reaction-time budget: 100 ms sensor latency + 100 ms poll
-# cycle + ~100 ms deceleration = ~300 ms total at 10 Hz polling
-_BASE_DETECTION_M: float = 0.35  # floor detection distance (empirically tuned: ranger
-# updates at ~10 Hz and the drone coasts ~80 mm before mc.stop() takes effect at 0.3 m/s)
+_REACTION_S: float = 0.60  # detection threshold scaling factor; formula activates above
+# ~0.42 m/s (BASE/REACTION_S crossover); chosen so at 0.6 m/s threshold = 0.36 m (vs
+# 0.25 m base), absorbing one extra poll-cycle of travel (~60 mm) at that speed
+_BASE_DETECTION_M: float = 0.25  # floor detection distance (empirically tuned: trigger at
+# ~0.23 m + ~80 mm coast = ~0.15 m stopping distance at 0.3 m/s)
 _BASE_AVOID_M: float = 0.20  # floor avoidance reversal distance
+_AVOID_REACTION_S: float = 0.60  # avoidance distance multiplier so reversal distance
+# scales with speed; at 0.6 m/s: max(0.20, 0.36) = 0.36 m at 1.2 m/s
 
-# Theoretical cap: velocity at which the formula equals the base floor.
-# Above this speed the drone cannot reliably stop in time with current tuning.
-MAX_SAFE_VELOCITY_M_S: float = _BASE_DETECTION_M / _REACTION_S  # ≈ 1.17 m/s
+# Practical safe-speed cap — not derived from the formula crossover (crossover ≈ 0.42 m/s).
+# Above this speed, sensor latency + poll granularity make reliable stopping uncertain.
+MAX_SAFE_VELOCITY_M_S: float = 0.83
 
 # Fallback avoidance velocity used when no FlightState is provided.
 # Preserves the original hardcoded behavior for backward compatibility.
@@ -303,6 +306,40 @@ class CollisionMonitor:
         dynamic_threshold = self._effective_threshold()
         return find_avoidance_move(readings, direction, dynamic_threshold) is not None
 
+    def _warn_detected(self, readings: MultiRangerReadings) -> bool:
+        """Return True if any sensor is within its 1.5× warning threshold.
+
+        Applies the same directional logic as _obstacle_detected but with
+        each per-sensor threshold scaled by 1.5 to give early warning.
+        The flight-direction sensor warns at dynamic_threshold × 1.5; all
+        other sensors warn at _SIDE_CLEARANCE_M × 1.5.
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if any sensor is within its warning distance.
+        """
+        direction = self._effective_flight_direction()
+        dynamic_warn = self._effective_threshold() * 1.5
+        active_sensor = _FLIGHT_DIR_TO_SENSOR.get(direction or "")
+        checks = [
+            (readings.front, "front"),
+            (readings.back, "back"),
+            (readings.left, "left"),
+            (readings.right, "right"),
+            (readings.up, "up"),
+        ]
+        for value, sensor_name in checks:
+            if value is None or value <= 0.0:
+                continue
+            warn_threshold = (
+                dynamic_warn if sensor_name == active_sensor else _SIDE_CLEARANCE_M * 1.5
+            )
+            if value < warn_threshold:
+                return True
+        return False
+
     def _trigger(self, ranger: MultiRangerDeck) -> None:
         """Fire the collision response if not already triggered.
 
@@ -331,7 +368,7 @@ class CollisionMonitor:
                 if direction is not None:
                     if self._flight_state is not None:
                         velocity = self._flight_state.get_velocity()
-                        avoid_distance_m = max(_BASE_AVOID_M, velocity * _REACTION_S)
+                        avoid_distance_m = max(_BASE_AVOID_M, velocity * _AVOID_REACTION_S)
                         avoid_velocity = velocity * 2.0
                     else:
                         avoid_distance_m = _BASE_AVOID_M
@@ -389,11 +426,10 @@ class CollisionMonitor:
                         _log_all_readings("Obstacle approaching", readings, threshold)
                 else:
                     threshold = self._effective_threshold()
-                    warn_threshold = threshold * 1.5
                     readings = ranger.get_readings()
                     obstacle_detected = self._obstacle_detected(readings)
                     if not self._triggered and obstacle_detected:
                         self._trigger(ranger)
-                    elif not self._triggered and ranger.is_obstacle_within(warn_threshold):
+                    elif not self._triggered and self._warn_detected(readings):
                         _log_all_readings("Obstacle approaching", readings, threshold)
                 time.sleep(_POLL_INTERVAL_S)

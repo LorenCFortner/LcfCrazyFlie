@@ -12,7 +12,6 @@ from Crazyflie.decks.multi_ranger import MultiRangerReadings
 from Crazyflie.safety.collision_monitor import (
     _SIDE_CLEARANCE_M,
     DEFAULT_MIN_DISTANCE_M,
-    MAX_SAFE_VELOCITY_M_S,
     CollisionMonitor,
     find_avoidance_move,
 )
@@ -393,20 +392,20 @@ class TestRun:
 
 class TestComputeThreshold:
     def test_zero_velocity_returns_base_detection(self):
-        # 0.0 * 0.20 = 0.0 < 0.35 (base) → returns base 0.35
-        assert CollisionMonitor._compute_threshold(0.0) == pytest.approx(0.35)
+        # 0.0 * 0.30 = 0.0 < 0.25 (base) → returns base 0.25
+        assert CollisionMonitor._compute_threshold(0.0) == pytest.approx(0.25)
 
     def test_low_velocity_returns_base_detection(self):
-        # 0.1 * 0.20 = 0.02 < 0.35 → returns base 0.35
-        assert CollisionMonitor._compute_threshold(0.1) == pytest.approx(0.35)
+        # 0.1 * 0.60 = 0.06 < 0.25 → returns base 0.25
+        assert CollisionMonitor._compute_threshold(0.1) == pytest.approx(0.25)
 
-    def test_boundary_velocity_returns_base(self):
-        # At MAX_SAFE_VELOCITY_M_S (1.75): 1.75 * 0.20 = 0.35 == base → max returns 0.35
-        assert CollisionMonitor._compute_threshold(MAX_SAFE_VELOCITY_M_S) == pytest.approx(0.35)
+    def test_formula_scales_above_crossover(self):
+        # Crossover ≈ 0.42 m/s; at 0.6 m/s: 0.6 * 0.60 = 0.36 > 0.25 → formula kicks in
+        assert CollisionMonitor._compute_threshold(0.6) == pytest.approx(0.36)
 
     def test_high_velocity_returns_velocity_times_reaction(self):
-        # 2.0 * 0.30 = 0.60 > 0.35 → returns 0.60
-        assert CollisionMonitor._compute_threshold(2.0) == pytest.approx(0.60)
+        # 2.0 * 0.60 = 1.20 > 0.25 → returns 1.20
+        assert CollisionMonitor._compute_threshold(2.0) == pytest.approx(1.20)
 
     def test_threshold_grows_with_velocity(self):
         low = CollisionMonitor._compute_threshold(0.5)
@@ -442,7 +441,7 @@ class TestDynamicAvoidance:
         return monitor, mock_ranger
 
     def test_avoidance_distance_is_base_at_low_speed(self, mock_scf, event_queue, mocker):
-        # 0.1 m/s * 0.20 = 0.02 < base 0.20 → avoid_distance = 0.20
+        # 0.1 m/s * 0.60 = 0.06 < base 0.20 → avoid_distance = 0.20
         monitor, mock_ranger = self._make_monitor_with_state(
             mock_scf, event_queue, mocker, velocity=0.1
         )
@@ -457,7 +456,7 @@ class TestDynamicAvoidance:
         assert distance_arg == pytest.approx(0.20)
 
     def test_avoidance_distance_scales_at_high_speed(self, mock_scf, event_queue, mocker):
-        # 2.0 m/s * 0.30 = 0.60 > base 0.35 → avoid_distance = 0.60
+        # 2.0 m/s * 0.60 = 1.20 > base 0.20 → avoid_distance = 1.20
         monitor, mock_ranger = self._make_monitor_with_state(
             mock_scf, event_queue, mocker, velocity=2.0
         )
@@ -468,7 +467,7 @@ class TestDynamicAvoidance:
 
         mock_mc.back.assert_called_once()
         distance_arg = mock_mc.back.call_args[0][0]
-        assert distance_arg == pytest.approx(0.60)
+        assert distance_arg == pytest.approx(1.20)
 
     def test_avoidance_velocity_is_two_times_flight_speed(self, mock_scf, event_queue, mocker):
         # flight at 0.5 m/s → avoidance at 1.0 m/s
@@ -708,11 +707,11 @@ class TestRunOnceDirectionalThreshold:
         assert monitor.is_triggered() is True
 
     def test_flight_dir_sensor_uses_dynamic_threshold(self, mock_scf, event_queue, mocker):
-        # Moving forward at 2.0 m/s; dynamic threshold = 0.60
-        # front sensor at 0.50 m < 0.60 → must trigger
-        readings = MultiRangerReadings(front=0.50, back=None, left=None, right=None, up=None)
+        # Moving forward at 0.6 m/s; dynamic threshold = 0.36 (0.6 * 0.60 > 0.25 base)
+        # front sensor at 0.30 m < 0.36 → must trigger
+        readings = MultiRangerReadings(front=0.30, back=None, left=None, right=None, up=None)
         monitor, _ = self._make_monitor_with_direction(
-            mock_scf, event_queue, mocker, velocity=2.0, direction="forward", readings=readings
+            mock_scf, event_queue, mocker, velocity=0.6, direction="forward", readings=readings
         )
 
         monitor._run_once()
@@ -722,11 +721,11 @@ class TestRunOnceDirectionalThreshold:
     def test_flight_dir_sensor_no_trigger_when_above_dynamic_threshold(
         self, mock_scf, event_queue, mocker
     ):
-        # Moving forward at 2.0 m/s; dynamic threshold = 0.60
-        # front sensor at 0.70 m > 0.60 → must NOT trigger
-        readings = MultiRangerReadings(front=0.70, back=None, left=None, right=None, up=None)
+        # Moving forward at 0.6 m/s; dynamic threshold = 0.36 (0.6 * 0.60 > 0.25 base)
+        # front sensor at 0.40 m > 0.36 → must NOT trigger
+        readings = MultiRangerReadings(front=0.40, back=None, left=None, right=None, up=None)
         monitor, _ = self._make_monitor_with_direction(
-            mock_scf, event_queue, mocker, velocity=2.0, direction="forward", readings=readings
+            mock_scf, event_queue, mocker, velocity=0.6, direction="forward", readings=readings
         )
 
         monitor._run_once()
@@ -756,3 +755,63 @@ class TestRunOnceDirectionalThreshold:
         monitor._run_once()
 
         assert monitor.is_triggered() is True
+
+
+# ---------------------------------------------------------------------------
+# _warn_detected — per-sensor 1.5× warning threshold logic
+# ---------------------------------------------------------------------------
+
+
+class TestWarnDetected:
+    """CollisionMonitor._warn_detected uses per-sensor directional thresholds × 1.5."""
+
+    def _make_monitor(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        velocity: float,
+        direction: str | None,
+    ) -> CollisionMonitor:
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        return CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+    def test_hover_sensor_at_0_45m_does_not_warn(self, mock_scf, event_queue):
+        # Mirrors the false-positive seen in flight logs: direction=None,
+        # back=0.45 m. Side clearance warn = 0.10 × 1.5 = 0.15 m.
+        # 0.45 > 0.15 → no warning.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.0, direction=None)
+        readings = _readings(back=0.45)
+        assert monitor._warn_detected(readings) is False
+
+    def test_hover_sensor_at_0_12m_warns(self, mock_scf, event_queue):
+        # direction=None; back=0.12 m. 0.12 < 0.15 → warns.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.0, direction=None)
+        readings = _readings(back=0.12)
+        assert monitor._warn_detected(readings) is True
+
+    def test_flight_dir_sensor_warns_at_1_5x_dynamic_threshold(self, mock_scf, event_queue):
+        # Moving forward at 0.3 m/s; dynamic threshold = 0.25 (base).
+        # warn = 0.25 × 1.5 = 0.375 m. front=0.35 < 0.375 → warns.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.3, direction="forward")
+        readings = _readings(front=0.35)
+        assert monitor._warn_detected(readings) is True
+
+    def test_flight_dir_sensor_no_warn_when_above_1_5x_threshold(self, mock_scf, event_queue):
+        # front=0.40 > 0.375 → no warning.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.3, direction="forward")
+        readings = _readings(front=0.40)
+        assert monitor._warn_detected(readings) is False
+
+    def test_side_sensor_does_not_warn_when_above_side_clearance_warn(self, mock_scf, event_queue):
+        # Moving forward; left=0.45 m. Side warn = 0.10 × 1.5 = 0.15 m.
+        # 0.45 > 0.15 → no warning (was a false-positive with old code).
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.3, direction="forward")
+        readings = _readings(left=0.45)
+        assert monitor._warn_detected(readings) is False
+
+    def test_side_sensor_warns_when_below_side_clearance_warn(self, mock_scf, event_queue):
+        # Moving forward; left=0.12 m < 0.15 → warns.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.3, direction="forward")
+        readings = _readings(left=0.12)
+        assert monitor._warn_detected(readings) is True

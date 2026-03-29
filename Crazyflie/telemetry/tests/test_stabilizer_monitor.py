@@ -379,3 +379,25 @@ class TestRun:
 
         assert eq.empty()
         assert monitor.is_triggered() is False
+
+    def test_run_sets_first_reading_event_after_first_packet(self, mock_scf, mock_queue, mocker):
+        self._patch_sync_logger(mocker, [self._make_log_entry()])
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+
+        monitor._run()
+
+        assert monitor._first_reading_event.is_set()
+
+
+class TestWaitForFirstReading:
+    def test_returns_true_when_event_already_set(self, mock_scf, mock_queue):
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+        monitor._first_reading_event.set()
+
+        assert monitor.wait_for_first_reading(timeout_s=1.0) is True
+
+    def test_returns_false_when_timeout_expires(self, mock_scf, mock_queue):
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+        # Event never set — should time out immediately
+
+        assert monitor.wait_for_first_reading(timeout_s=0.01) is False

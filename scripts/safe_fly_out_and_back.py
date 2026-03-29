@@ -40,7 +40,7 @@ URI = "radio://0/1/250K"
 _POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
 OUT_AND_BACK_PATH = [
-    FlightStep("forward", 3.0, velocity=0.3),
+    FlightStep("forward", 3.0, velocity=0.6),
 ]
 
 
@@ -107,7 +107,7 @@ def handle_safety_events(
         land_on_low_battery(mc)
     elif event == "COLLISION":
         logger.warning("Obstacle detected — avoidance complete, landing now.")
-        land_immediately(mc)
+        mc.land()
     else:
         logger.warning(f"Unknown event '{event}' — landing immediately as precaution.")
         land_immediately(mc)
@@ -155,8 +155,7 @@ def main() -> None:
 
         collision_monitor = CollisionMonitor(scf, event_queue, flight_state=flight_state)
 
-        # Give stabilizer monitor one poll cycle to read initial telemetry.
-        time.sleep(0.15)
+        stabilizer_monitor.wait_for_first_reading()
         initial_battery_v = stabilizer_monitor.state.battery_v
         initial_height_mm = stabilizer_monitor.state.height_mm
         logger.info(f"Battery: {initial_battery_v:.2f} V")

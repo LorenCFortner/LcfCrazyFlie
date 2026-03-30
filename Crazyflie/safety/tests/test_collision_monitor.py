@@ -1129,3 +1129,193 @@ class TestRunOnceDiagonal:
         monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
         readings = _readings(front=0.65, right=0.65)
         assert monitor._warn_detected(readings) is True
+
+
+# ---------------------------------------------------------------------------
+# Diagonal fallback avoidance — reverse flight direction when no sensor fired
+# ---------------------------------------------------------------------------
+
+
+class TestDiagonalFallbackAvoidance:
+    """When diagonal fires but find_avoidance_move returns None, _trigger falls back to
+    moving opposite to the flight direction."""
+
+    def _make_monitor(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        velocity: float,
+        direction: str | None,
+        readings: MultiRangerReadings,
+    ) -> tuple[CollisionMonitor, Any]:
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = readings
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        return monitor, mock_ranger
+
+    def test_moves_back_when_diagonal_fires_in_forward_direction(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # v=0.83, forward: front=0.55, right=0.25 → diagonal fires, no direct fires
+        # find_avoidance_move returns None → fallback should move "back"
+        readings = MultiRangerReadings(front=0.55, back=None, left=None, right=0.25, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="forward", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "direction,avoidance",
+        [
+            ("forward", "back"),
+            ("back", "forward"),
+            ("left", "right"),
+            ("right", "left"),
+        ],
+    )
+    def test_fallback_direction_for_each_horizontal_direction(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        direction: str,
+        avoidance: str,
+    ) -> None:
+        # All readings are None so find_avoidance_move returns None.
+        # FlightState has a horizontal direction → fallback fires with opposite direction.
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction=direction, readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        getattr(mock_mc, avoidance).assert_called_once()
+
+    def test_fallback_not_applied_when_direct_avoidance_found(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # front=0.05 < side_clearance=0.10 → find_avoidance_move returns "back" directly.
+        # Fallback must NOT double-call back or override the result.
+        readings = MultiRangerReadings(front=0.05, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="forward", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        # back() should be called exactly once (from the direct avoidance, not the fallback)
+        mock_mc.back.assert_called_once()
+
+    def test_fallback_not_applied_without_flight_state(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # Backward-compat: no FlightState → diagonal code never reached,
+        # no avoidance move when readings are all-None.
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=None, back=None, left=None, right=None, up=None
+        )
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        monitor = CollisionMonitor(mock_scf, event_queue)  # no flight_state
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_not_called()
+        mock_mc.forward.assert_not_called()
+        mock_mc.left.assert_not_called()
+        mock_mc.right.assert_not_called()
+
+    def test_fallback_not_applied_for_up_direction(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # "up" is not in _DIAGONAL_PAIRS → fallback must never fire for up direction.
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="up", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_not_called()
+        mock_mc.forward.assert_not_called()
+        mock_mc.left.assert_not_called()
+        mock_mc.right.assert_not_called()
+        mock_mc.down.assert_not_called()
+
+    def test_fallback_not_applied_for_none_direction(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # direction=None (hover) is not in _DIAGONAL_PAIRS → no fallback.
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction=None, readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_not_called()
+        mock_mc.forward.assert_not_called()
+        mock_mc.left.assert_not_called()
+        mock_mc.right.assert_not_called()
+        mock_mc.down.assert_not_called()
+
+    def test_fallback_avoidance_distance_scales_with_velocity(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # v=0.83 m/s → avoid_distance = max(0.20, 0.83 × 0.60) = max(0.20, 0.498) = 0.498 m
+        # All-None readings so find_avoidance_move → None → fallback fires
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="forward", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        distance_arg = mock_mc.back.call_args[0][0]
+        assert distance_arg == pytest.approx(0.498)
+
+    def test_fallback_avoidance_velocity_scales_with_flight_speed(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # v=0.83 m/s → avoid_velocity = 0.83 × 2.0 = 1.66 m/s
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="forward", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
+        assert velocity_kwarg == pytest.approx(1.66)

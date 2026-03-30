@@ -87,6 +87,15 @@ _FLIGHT_DIR_TO_SENSOR: dict[str, str] = {
 _SENSOR_OFFSET_M: float = 0.017  # centre-to-sensor-face distance (1.7 cm)
 _DIAGONAL_BASE_M: float = 0.12  # blade radius (7 cm) + tip clearance (5 cm)
 
+# Reverse of each horizontal flight direction used as fallback avoidance when
+# the diagonal check fires but no individual sensor is below its threshold.
+_FLIGHT_DIR_REVERSE: dict[str, str] = {
+    "forward": "back",
+    "back": "forward",
+    "left": "right",
+    "right": "left",
+}
+
 # Maps horizontal flight directions to their two diagonal adjacent sensor pairs.
 # "up" is absent — blades are horizontal so there is no diagonal blade sweep
 # into vertical space. None direction is also absent (hover: no approach velocity).
@@ -469,6 +478,8 @@ class CollisionMonitor:
                 self._mc.stop()
                 flight_direction = self._effective_flight_direction()
                 direction = find_avoidance_move(readings, flight_direction, threshold)
+                if direction is None and flight_direction in _DIAGONAL_PAIRS:
+                    direction = _FLIGHT_DIR_REVERSE.get(flight_direction)
                 if direction is not None:
                     if self._flight_state is not None:
                         velocity = self._flight_state.get_velocity()

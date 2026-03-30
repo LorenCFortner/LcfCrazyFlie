@@ -156,3 +156,49 @@ class TestCheckPreflightClearance:
         )
         assert check_preflight_clearance(scf, min_clearance_m=0.3) is True
         assert check_preflight_clearance(scf, min_clearance_m=0.6) is False
+
+    def test_blocked_direction_logged_at_warning_level(
+        self, patched_clearance, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        scf, ranger = patched_clearance
+        ranger.get_readings.return_value = _readings(
+            front=0.1, back=1.0, left=1.0, right=1.0, up=1.0
+        )
+        with caplog.at_level(logging.WARNING, logger="Crazyflie.safety.clearance_check"):
+            check_preflight_clearance(scf)
+
+        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("front" in m and "BLOCKED" in m for m in warning_messages)
+
+    def test_clear_directions_not_logged_at_warning_level(
+        self, patched_clearance, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        scf, ranger = patched_clearance
+        ranger.get_readings.return_value = _readings(
+            front=1.0, back=1.0, left=1.0, right=1.0, up=1.0
+        )
+        with caplog.at_level(logging.WARNING, logger="Crazyflie.safety.clearance_check"):
+            check_preflight_clearance(scf)
+
+        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert not warning_messages
+
+    def test_multiple_blocked_directions_each_logged_at_warning(
+        self, patched_clearance, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        scf, ranger = patched_clearance
+        ranger.get_readings.return_value = _readings(
+            front=0.1, back=1.0, left=0.15, right=1.0, up=1.0
+        )
+        with caplog.at_level(logging.WARNING, logger="Crazyflie.safety.clearance_check"):
+            check_preflight_clearance(scf)
+
+        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("front" in m and "BLOCKED" in m for m in warning_messages)
+        assert any("left" in m and "BLOCKED" in m for m in warning_messages)

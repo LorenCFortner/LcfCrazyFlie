@@ -95,11 +95,10 @@ def _log_clearance_report(
     ]
     for name, value in directions:
         if value is None:
-            status = "clear (no reading)"
+            logger.info("  %s: clear (no reading)", name)
         elif value == 0.0:
-            status = "clear (sensor not ready)"
+            logger.info("  %s: clear (sensor not ready)", name)
         elif value < min_clearance_m:
-            status = f"BLOCKED at {value:.2f} m (< {min_clearance_m:.2f} m)"
+            logger.warning("  %s: BLOCKED at %.2f m (< %.2f m)", name, value, min_clearance_m)
         else:
-            status = f"clear at {value:.2f} m"
-        logger.info(f"  {name:5s}: {status}")
+            logger.info("  %s: clear at %.2f m", name, value)

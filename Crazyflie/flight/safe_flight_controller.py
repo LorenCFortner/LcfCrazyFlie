@@ -116,6 +116,17 @@ class SafeFlightController:
         """
         self._steps = steps
         self._state = flight_state
+        self._distance_traveled_m: float = 0.0
+
+    @property
+    def distance_traveled_m(self) -> float:
+        """Total linear distance flown since this controller was created.
+
+        Accumulates the distance of every completed linear step plus the
+        partial distance of any step that was aborted mid-move (estimated
+        from elapsed poll time × velocity). Turn steps contribute 0 m.
+        """
+        return self._distance_traveled_m
 
     def run(
         self,
@@ -135,9 +146,7 @@ class SafeFlightController:
         for step in self._steps:
             if should_abort and should_abort():
                 return
-            aborted = self._execute(
-                mc, step.command, step.distance_m, step.velocity, should_abort, self._state
-            )
+            aborted = self._execute(mc, step.command, step.distance_m, step.velocity, should_abort)
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -169,9 +178,7 @@ class SafeFlightController:
         for step in self._steps:
             if should_abort and should_abort():
                 return
-            aborted = self._execute(
-                mc, step.command, step.distance_m, step.velocity, should_abort, self._state
-            )
+            aborted = self._execute(mc, step.command, step.distance_m, step.velocity, should_abort)
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -184,7 +191,7 @@ class SafeFlightController:
         # 180° interruptible pivot to face home — sets direction=None on FlightState
         # (pivot velocity is deg/s, not m/s, so velocity is not updated)
         aborted = self._execute(
-            mc, "turn_right", _PIVOT_DEGREES, _PIVOT_RATE_DEG_PER_S, should_abort, self._state
+            mc, "turn_right", _PIVOT_DEGREES, _PIVOT_RATE_DEG_PER_S, should_abort
         )
         if aborted:
             return
@@ -194,9 +201,7 @@ class SafeFlightController:
             if should_abort and should_abort():
                 return
             inverted = _TURN_AROUND_INVERSION.get(step.command, step.command)
-            aborted = self._execute(
-                mc, inverted, step.distance_m, step.velocity, should_abort, self._state
-            )
+            aborted = self._execute(mc, inverted, step.distance_m, step.velocity, should_abort)
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -223,25 +228,26 @@ class SafeFlightController:
             if should_abort and should_abort():
                 return
             inverted = _REVERSE_DIRECTION.get(step.command, step.command)
-            aborted = self._execute(
-                mc, inverted, step.distance_m, step.velocity, should_abort, self._state
-            )
+            aborted = self._execute(mc, inverted, step.distance_m, step.velocity, should_abort)
             if aborted:
                 return
             if step.settle_s > 0.0:
                 if self._sleep_interruptible(step.settle_s, should_abort):
                     return
 
-    @staticmethod
     def _execute(
+        self,
         mc: MotionCommander,
         command: str,
         distance_m: float,
         velocity: float,
         should_abort: Callable[[], bool] | None,
-        flight_state: FlightState | None = None,
     ) -> bool:
         """Start a movement, poll for abort every 50 ms, then stop.
+
+        Updates self._distance_traveled_m for linear commands:
+        adds distance_m on completion or velocity * elapsed on abort.
+        Turn commands contribute 0 m.
 
         Args:
             mc: Active MotionCommander instance.
@@ -249,8 +255,6 @@ class SafeFlightController:
             distance_m: Distance in metres (or degrees for turns).
             velocity: Speed in m/s (or deg/s for turns).
             should_abort: Callable returning True to abort mid-move.
-            flight_state: Optional shared state; updated before movement starts
-                for linear commands. Never updated for turn commands.
 
         Returns:
             True if the move was aborted early, False if it completed.
@@ -272,12 +276,12 @@ class SafeFlightController:
                 f"{MAX_SAFE_VELOCITY_M_S:.3f} m/s"
             )
 
-        if flight_state is not None:
+        if self._state is not None:
             if is_turn:
-                flight_state.set_direction(None)
+                self._state.set_direction(None)
             else:
-                flight_state.set_velocity(velocity)
-                flight_state.set_direction(command)
+                self._state.set_velocity(velocity)
+                self._state.set_direction(command)
 
         start_method = _START_METHOD.get(command)
         if start_method is None:
@@ -290,11 +294,15 @@ class SafeFlightController:
         while elapsed < duration_s:
             if should_abort and should_abort():
                 mc.stop()
+                if not is_turn:
+                    self._distance_traveled_m += velocity * elapsed
                 return True
             time.sleep(_POLL_S)
             elapsed += _POLL_S
 
         mc.stop()
+        if not is_turn:
+            self._distance_traveled_m += distance_m
         return False
 
     @staticmethod

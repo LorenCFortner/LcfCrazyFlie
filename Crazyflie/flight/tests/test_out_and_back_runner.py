@@ -67,7 +67,9 @@ def test_handle_safety_events_calls_land_on_low_battery_on_batlow(
     mock_land.assert_called_once_with(mc)
 
 
-def test_handle_safety_events_calls_mc_land_on_collision(mc, scf, stabilizer_monitor):
+def test_handle_safety_events_calls_mc_land_on_collision_when_no_collision_fn(
+    mc, scf, stabilizer_monitor
+):
     eq: queue.Queue[str] = queue.Queue()
     eq.put("COLLISION")
 
@@ -75,6 +77,40 @@ def test_handle_safety_events_calls_mc_land_on_collision(mc, scf, stabilizer_mon
 
     assert result is True
     mc.land.assert_called_once()
+
+
+def test_handle_safety_events_calls_custom_collision_fn_with_distance_on_collision(
+    mocker, mc, scf, stabilizer_monitor
+):
+    custom_fn = mocker.MagicMock()
+    eq: queue.Queue[str] = queue.Queue()
+    eq.put("COLLISION")
+
+    result = _handle_safety_events(
+        eq, mc, scf, stabilizer_monitor, on_collision_fn=custom_fn, distance_traveled_m=1.5
+    )
+
+    assert result is True
+    custom_fn.assert_called_once_with(mc, 1.5)
+    mc.land.assert_not_called()
+
+
+def test_handle_safety_events_custom_collision_fn_receives_correct_distance(
+    mocker, mc, scf, stabilizer_monitor
+):
+    received: list[float] = []
+
+    def capture_fn(mc_arg, dist: float) -> None:
+        received.append(dist)
+
+    eq: queue.Queue[str] = queue.Queue()
+    eq.put("COLLISION")
+
+    _handle_safety_events(
+        eq, mc, scf, stabilizer_monitor, on_collision_fn=capture_fn, distance_traveled_m=2.75
+    )
+
+    assert received == [pytest.approx(2.75)]
 
 
 def test_handle_safety_events_calls_land_immediately_on_unknown_event(

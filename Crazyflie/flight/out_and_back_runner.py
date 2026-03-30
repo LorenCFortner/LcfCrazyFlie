@@ -57,6 +57,8 @@ def _handle_safety_events(
     mc: MotionCommander,
     scf: SyncCrazyflie,
     stabilizer_monitor: StabilizerMonitor,
+    on_collision_fn: Callable[[MotionCommander, float], None] | None = None,
+    distance_traveled_m: float = 0.0,
 ) -> bool:
     """Drain the event queue and react to any safety events.
 
@@ -65,6 +67,11 @@ def _handle_safety_events(
         mc: Active MotionCommander instance.
         scf: Connected SyncCrazyflie instance.
         stabilizer_monitor: Running StabilizerMonitor (stopped on event).
+        on_collision_fn: Optional callable invoked on COLLISION instead of
+            mc.land(). Receives the MotionCommander and the distance flown
+            before the collision in metres.
+        distance_traveled_m: Linear distance flown before the abort, passed
+            to on_collision_fn when provided.
 
     Returns:
         True if an emergency landing was triggered, False if queue was clear.
@@ -84,8 +91,15 @@ def _handle_safety_events(
         logger.warning("Low battery — landing now.")
         land_on_low_battery(mc)
     elif event == "COLLISION":
-        logger.warning("Obstacle detected — avoidance complete, landing now.")
-        mc.land()
+        if on_collision_fn is not None:
+            logger.warning(
+                f"Obstacle detected — avoidance complete, executing collision response"
+                f" ({distance_traveled_m:.2f} m traveled)."
+            )
+            on_collision_fn(mc, distance_traveled_m)
+        else:
+            logger.warning("Obstacle detected — avoidance complete, landing now.")
+            mc.land()
     else:
         logger.warning(f"Unknown event '{event}' — landing immediately as precaution.")
         land_immediately(mc)
@@ -99,6 +113,7 @@ def run_out_and_back_flight(
     description: str,
     pre_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
     post_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
+    on_collision_fn: Callable[[MotionCommander, float], None] | None = None,
 ) -> None:
     """Execute a path out-and-back flight with full safety architecture.
 
@@ -118,6 +133,9 @@ def run_out_and_back_flight(
             + effect 7 + brightness 31 when None.
         post_flight_fn: Called after landing to clean up (e.g. LED off).
             Defaults to turning off the LED ring when None.
+        on_collision_fn: Called on a COLLISION event instead of mc.land().
+            Receives the MotionCommander and the linear distance flown before
+            the collision in metres. Defaults to mc.land() when None.
     """
     _pre = pre_flight_fn if pre_flight_fn is not None else _default_pre_flight
     _post = post_flight_fn if post_flight_fn is not None else _default_post_flight
@@ -191,7 +209,14 @@ def run_out_and_back_flight(
 
                 # Drain remaining safety events before landing.
                 while not event_queue.empty():
-                    if _handle_safety_events(event_queue, mc, scf, stabilizer_monitor):
+                    if _handle_safety_events(
+                        event_queue,
+                        mc,
+                        scf,
+                        stabilizer_monitor,
+                        on_collision_fn=on_collision_fn,
+                        distance_traveled_m=controller.distance_traveled_m,
+                    ):
                         break
 
                 logger.info("Route complete — landing.")

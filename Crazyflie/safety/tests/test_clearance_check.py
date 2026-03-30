@@ -104,7 +104,7 @@ class TestCheckPreflightClearance:
     def test_returns_false_when_front_too_close(self, patched_clearance):
         scf, ranger = patched_clearance
         ranger.get_readings.return_value = _readings(
-            front=0.1, back=1.0, left=1.0, right=1.0, up=1.0
+            front=0.05, back=1.0, left=1.0, right=1.0, up=1.0
         )
         assert check_preflight_clearance(scf) is False
 
@@ -113,15 +113,15 @@ class TestCheckPreflightClearance:
         [
             (
                 "front",
-                {"front": 0.1, "back": 1.0, "left": 1.0, "right": 1.0, "up": 1.0},
+                {"front": 0.05, "back": 1.0, "left": 1.0, "right": 1.0, "up": 1.0},
             ),
-            ("back", {"front": 1.0, "back": 0.1, "left": 1.0, "right": 1.0, "up": 1.0}),
-            ("left", {"front": 1.0, "back": 1.0, "left": 0.1, "right": 1.0, "up": 1.0}),
+            ("back", {"front": 1.0, "back": 0.05, "left": 1.0, "right": 1.0, "up": 1.0}),
+            ("left", {"front": 1.0, "back": 1.0, "left": 0.05, "right": 1.0, "up": 1.0}),
             (
                 "right",
-                {"front": 1.0, "back": 1.0, "left": 1.0, "right": 0.1, "up": 1.0},
+                {"front": 1.0, "back": 1.0, "left": 1.0, "right": 0.05, "up": 1.0},
             ),
-            ("up", {"front": 1.0, "back": 1.0, "left": 1.0, "right": 1.0, "up": 0.1}),
+            ("up", {"front": 1.0, "back": 1.0, "left": 1.0, "right": 1.0, "up": 0.05}),
         ],
     )
     def test_returns_false_for_each_blocked_direction(self, patched_clearance, direction, kwargs):
@@ -164,7 +164,7 @@ class TestCheckPreflightClearance:
 
         scf, ranger = patched_clearance
         ranger.get_readings.return_value = _readings(
-            front=0.1, back=1.0, left=1.0, right=1.0, up=1.0
+            front=0.05, back=1.0, left=1.0, right=1.0, up=1.0
         )
         with caplog.at_level(logging.WARNING, logger="Crazyflie.safety.clearance_check"):
             check_preflight_clearance(scf)
@@ -194,7 +194,7 @@ class TestCheckPreflightClearance:
 
         scf, ranger = patched_clearance
         ranger.get_readings.return_value = _readings(
-            front=0.1, back=1.0, left=0.15, right=1.0, up=1.0
+            front=0.05, back=1.0, left=0.07, right=1.0, up=1.0
         )
         with caplog.at_level(logging.WARNING, logger="Crazyflie.safety.clearance_check"):
             check_preflight_clearance(scf)

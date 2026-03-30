@@ -20,7 +20,7 @@ from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
 
 logger = logging.getLogger(__name__)
 
-MIN_PREFLIGHT_CLEARANCE_M: float = 0.3
+MIN_PREFLIGHT_CLEARANCE_M: float = 0.1
 _SENSOR_WARMUP_S: float = 0.5
 
 
@@ -63,7 +63,7 @@ def check_preflight_clearance(
 
     Args:
         scf: Connected SyncCrazyflie instance.
-        min_clearance_m: Minimum safe clearance in metres. Defaults to 0.3.
+        min_clearance_m: Minimum safe clearance in metres. Defaults to 0.1.
 
     Returns:
         True if all directions have sufficient clearance, False otherwise.

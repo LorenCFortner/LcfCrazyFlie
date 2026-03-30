@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from Crazyflie.flight.path_runner import FlightStep
-from Crazyflie.flight.safe_flight_controller import SafeFlightController
+from Crazyflie.flight.safe_flight_controller import _POLL_S, SafeFlightController
 from Crazyflie.safety.collision_monitor import MAX_SAFE_VELOCITY_M_S
 from Crazyflie.state.flight_state import FlightState
 
@@ -632,3 +632,70 @@ class TestMaxVelocityEnforcement:
                 controller.run(mock_mc)
 
         mock_mc.start_forward.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# distance_traveled_m — tracks linear distance flown before abort or completion
+# ---------------------------------------------------------------------------
+
+
+class TestDistanceTraveled:
+    def test_distance_traveled_starts_at_zero(self):
+        controller = SafeFlightController([FlightStep("forward", 1.0)])
+        assert controller.distance_traveled_m == pytest.approx(0.0)
+
+    def test_distance_traveled_equals_full_step_after_completed_linear_step(self, mock_mc):
+        controller = SafeFlightController([FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0)])
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+        assert controller.distance_traveled_m == pytest.approx(1.0)
+
+    def test_distance_traveled_is_zero_after_turn_step(self, mock_mc):
+        controller = SafeFlightController(
+            [FlightStep("turn_left", 90.0, velocity=45.0, settle_s=0.0)]
+        )
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+        assert controller.distance_traveled_m == pytest.approx(0.0)
+
+    def test_distance_traveled_is_partial_when_aborted_mid_step(self, mock_mc):
+        # Tie the abort to sleep calls so the run() pre-check doesn't shift the count.
+        # After target_cycles sleeps, elapsed = target_cycles * _POLL_S inside _execute.
+        target_cycles = 3
+        sleep_count = [0]
+
+        def counting_sleep(duration: float) -> None:
+            sleep_count[0] += 1
+
+        def abort_after_target_sleeps() -> bool:
+            return sleep_count[0] >= target_cycles
+
+        velocity = 0.5
+        controller = SafeFlightController(
+            [FlightStep("forward", 10.0, velocity=velocity, settle_s=0.0)]
+        )
+        with patch(
+            "Crazyflie.flight.safe_flight_controller.time.sleep",
+            side_effect=counting_sleep,
+        ):
+            controller.run(mock_mc, should_abort=abort_after_target_sleeps)
+
+        expected = velocity * target_cycles * _POLL_S
+        assert controller.distance_traveled_m == pytest.approx(expected)
+
+    def test_distance_traveled_accumulates_across_multiple_completed_steps(self, mock_mc):
+        controller = SafeFlightController(
+            [
+                FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0),
+                FlightStep("left", 0.5, velocity=0.5, settle_s=0.0),
+            ]
+        )
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+        assert controller.distance_traveled_m == pytest.approx(1.5)
+
+    def test_distance_traveled_not_changed_when_abort_fires_before_movement_starts(self, mock_mc):
+        controller = SafeFlightController([FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0)])
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=always_abort)
+        assert controller.distance_traveled_m == pytest.approx(0.0)

@@ -30,15 +30,21 @@ Example:
     ...     )
 """
 
+from __future__ import annotations
+
 import logging
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.flight.path_runner import FlightStep
 from Crazyflie.safety.collision_monitor import MAX_SAFE_VELOCITY_M_S
 from Crazyflie.state.flight_state import FlightState
+
+if TYPE_CHECKING:
+    from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +112,7 @@ class SafeFlightController:
         self,
         steps: list[FlightStep],
         flight_state: FlightState | None = None,
+        adaptive_corrector: AdaptivePathCorrector | None = None,
     ) -> None:
         """Initialize with a list of FlightSteps and optional shared state.
 
@@ -113,9 +120,12 @@ class SafeFlightController:
             steps: Ordered list of flight steps to execute.
             flight_state: Optional shared state. When provided, the current
                 velocity is written before each linear movement step.
+            adaptive_corrector: Optional corrector. When provided, _execute()
+                checks for a pending correction each poll cycle and applies it.
         """
         self._steps = steps
         self._state = flight_state
+        self._adaptive_corrector = adaptive_corrector
         self._distance_traveled_m: float = 0.0
 
     @property
@@ -146,7 +156,14 @@ class SafeFlightController:
         for step in self._steps:
             if should_abort and should_abort():
                 return
-            aborted = self._execute(mc, step.command, step.distance_m, step.velocity, should_abort)
+            aborted = self._execute(
+                mc,
+                step.command,
+                step.distance_m,
+                step.velocity,
+                should_abort,
+                self._adaptive_corrector,
+            )
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -178,7 +195,14 @@ class SafeFlightController:
         for step in self._steps:
             if should_abort and should_abort():
                 return
-            aborted = self._execute(mc, step.command, step.distance_m, step.velocity, should_abort)
+            aborted = self._execute(
+                mc,
+                step.command,
+                step.distance_m,
+                step.velocity,
+                should_abort,
+                self._adaptive_corrector,
+            )
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -191,7 +215,12 @@ class SafeFlightController:
         # 180° interruptible pivot to face home — sets direction=None on FlightState
         # (pivot velocity is deg/s, not m/s, so velocity is not updated)
         aborted = self._execute(
-            mc, "turn_right", _PIVOT_DEGREES, _PIVOT_RATE_DEG_PER_S, should_abort
+            mc,
+            "turn_right",
+            _PIVOT_DEGREES,
+            _PIVOT_RATE_DEG_PER_S,
+            should_abort,
+            self._adaptive_corrector,
         )
         if aborted:
             return
@@ -201,7 +230,14 @@ class SafeFlightController:
             if should_abort and should_abort():
                 return
             inverted = _TURN_AROUND_INVERSION.get(step.command, step.command)
-            aborted = self._execute(mc, inverted, step.distance_m, step.velocity, should_abort)
+            aborted = self._execute(
+                mc,
+                inverted,
+                step.distance_m,
+                step.velocity,
+                should_abort,
+                self._adaptive_corrector,
+            )
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -228,7 +264,14 @@ class SafeFlightController:
             if should_abort and should_abort():
                 return
             inverted = _REVERSE_DIRECTION.get(step.command, step.command)
-            aborted = self._execute(mc, inverted, step.distance_m, step.velocity, should_abort)
+            aborted = self._execute(
+                mc,
+                inverted,
+                step.distance_m,
+                step.velocity,
+                should_abort,
+                self._adaptive_corrector,
+            )
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -242,6 +285,7 @@ class SafeFlightController:
         distance_m: float,
         velocity: float,
         should_abort: Callable[[], bool] | None,
+        adaptive_corrector: AdaptivePathCorrector | None = None,
     ) -> bool:
         """Start a movement, poll for abort every 50 ms, then stop.
 
@@ -249,12 +293,17 @@ class SafeFlightController:
         adds distance_m on completion or velocity * elapsed on abort.
         Turn commands contribute 0 m.
 
+        When adaptive_corrector is provided and not a turn step, checks for a
+        pending correction each poll cycle. On correction: stops, applies the
+        turn/nudge, extends duration_s by the correction time, resumes movement.
+
         Args:
             mc: Active MotionCommander instance.
             command: Movement command name ('forward', 'turn_left', etc.).
             distance_m: Distance in metres (or degrees for turns).
             velocity: Speed in m/s (or deg/s for turns).
             should_abort: Callable returning True to abort mid-move.
+            adaptive_corrector: Optional corrector supplying mid-step corrections.
 
         Returns:
             True if the move was aborted early, False if it completed.
@@ -263,6 +312,11 @@ class SafeFlightController:
             ValueError: If velocity exceeds MAX_SAFE_VELOCITY_M_S for linear
                 commands. Turn commands are exempt (velocity is in deg/s).
         """
+        from Crazyflie.safety.adaptive_path_corrector import (
+            ADAPTIVE_TURN_RATE_DEG_S,
+            ADAPTIVE_VERT_VELOCITY,
+        )
+
         is_turn = command in _TURN_COMMANDS
 
         if not is_turn and velocity > MAX_SAFE_VELOCITY_M_S:
@@ -297,6 +351,24 @@ class SafeFlightController:
                 if not is_turn:
                     self._distance_traveled_m += velocity * elapsed
                 return True
+
+            if adaptive_corrector is not None and not is_turn:
+                correction = adaptive_corrector.get_correction()
+                if correction is not None:
+                    cmd, magnitude = correction
+                    adaptive_corrector.begin_correction()
+                    mc.stop()
+                    nudge_start = time.monotonic()
+                    if cmd in ("turn_left", "turn_right"):
+                        getattr(mc, cmd)(magnitude, rate=ADAPTIVE_TURN_RATE_DEG_S)
+                    else:
+                        getattr(mc, cmd)(magnitude, velocity=ADAPTIVE_VERT_VELOCITY)
+                    duration_s += time.monotonic() - nudge_start
+                    adaptive_corrector.end_correction()
+                    adaptive_corrector.reset_correction()
+                    if not (should_abort and should_abort()):
+                        getattr(mc, start_method)(velocity)
+
             time.sleep(_POLL_S)
             elapsed += _POLL_S
 

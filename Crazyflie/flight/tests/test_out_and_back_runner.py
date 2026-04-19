@@ -5,6 +5,8 @@ requiring a real drone connection.
 """
 
 import queue
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -141,3 +143,87 @@ def test_handle_safety_events_does_not_stop_monitor_when_queue_empty(mc, scf, st
     _handle_safety_events(eq, mc, scf, stabilizer_monitor)
 
     stabilizer_monitor.stop.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# AdaptivePathCorrector wiring in run_out_and_back_flight()
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveCorrectorWiring:
+    """run_out_and_back_flight() constructs and wires AdaptivePathCorrector."""
+
+    def _run_flight(self, mocker: Any) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
+        """Run run_out_and_back_flight() with all hardware mocked."""
+        from Crazyflie.flight.out_and_back_runner import run_out_and_back_flight
+        from Crazyflie.flight.path_runner import FlightStep
+
+        path = [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)]
+
+        mock_scf_instance = mocker.MagicMock()
+        mock_scf_cm = mocker.MagicMock()
+        mock_scf_cm.__enter__ = mocker.MagicMock(return_value=mock_scf_instance)
+        mock_scf_cm.__exit__ = mocker.MagicMock(return_value=False)
+        mocker.patch(
+            "Crazyflie.flight.out_and_back_runner.SyncCrazyflie", return_value=mock_scf_cm
+        )
+
+        mock_mc_instance = mocker.MagicMock()
+        mock_mc_cm = mocker.MagicMock()
+        mock_mc_cm.__enter__ = mocker.MagicMock(return_value=mock_mc_instance)
+        mock_mc_cm.__exit__ = mocker.MagicMock(return_value=False)
+        mocker.patch(
+            "Crazyflie.flight.out_and_back_runner.MotionCommander", return_value=mock_mc_cm
+        )
+
+        mocker.patch("Crazyflie.flight.out_and_back_runner.cflib.crtp.init_drivers")
+        mocker.patch(
+            "Crazyflie.flight.out_and_back_runner.check_preflight_clearance",
+            return_value=True,
+        )
+
+        mock_stabilizer = mocker.MagicMock()
+        mock_stabilizer.state.battery_v = 4.0
+        mock_stabilizer.state.height_mm = 400
+        mock_stabilizer.is_triggered.return_value = False
+        mocker.patch(
+            "Crazyflie.flight.out_and_back_runner.StabilizerMonitor",
+            return_value=mock_stabilizer,
+        )
+
+        mock_collision = mocker.MagicMock()
+        mock_collision.is_triggered.return_value = False
+        collision_cls = mocker.patch(
+            "Crazyflie.flight.out_and_back_runner.CollisionMonitor",
+            return_value=mock_collision,
+        )
+
+        mock_corrector = mocker.MagicMock()
+        corrector_cls = mocker.patch(
+            "Crazyflie.flight.out_and_back_runner.AdaptivePathCorrector",
+            return_value=mock_corrector,
+        )
+
+        mocker.patch("Crazyflie.flight.out_and_back_runner.verify_takeoff", return_value=True)
+        mocker.patch("Crazyflie.flight.out_and_back_runner.time.sleep")
+
+        run_out_and_back_flight(path, uri="radio://0/80/2M", description="test")
+
+        return collision_cls, corrector_cls, mock_corrector, mock_collision
+
+    def test_creates_adaptive_corrector(self, mocker):
+        """AdaptivePathCorrector is constructed during the flight."""
+        _, corrector_cls, _, _ = self._run_flight(mocker)
+        corrector_cls.assert_called_once()
+
+    def test_starts_and_stops_adaptive_corrector(self, mocker):
+        """AdaptivePathCorrector.start() and stop() are called around flight."""
+        _, _, mock_corrector, _ = self._run_flight(mocker)
+        mock_corrector.start.assert_called_once()
+        mock_corrector.stop.assert_called_once()
+
+    def test_passes_adaptive_corrector_to_collision_monitor(self, mocker):
+        """CollisionMonitor receives the corrector at construction."""
+        collision_cls, _, mock_corrector, _ = self._run_flight(mocker)
+        _, kwargs = collision_cls.call_args
+        assert kwargs.get("adaptive_corrector") is mock_corrector

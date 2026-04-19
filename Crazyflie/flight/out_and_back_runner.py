@@ -20,6 +20,7 @@ from cflib.positioning.motion_commander import MotionCommander
 from Crazyflie.decks.led_ring import LedRingDeck
 from Crazyflie.flight.path_runner import FlightStep
 from Crazyflie.flight.safe_flight_controller import SafeFlightController
+from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
 from Crazyflie.safety.clearance_check import check_preflight_clearance
 from Crazyflie.safety.collision_monitor import CollisionMonitor
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
@@ -144,7 +145,6 @@ def run_out_and_back_flight(
 
     event_queue: queue.Queue[str] = queue.Queue()
     flight_state = FlightState()
-    controller = SafeFlightController(path, flight_state=flight_state)
 
     logger.info(f"Connecting to {uri}...")
 
@@ -166,7 +166,16 @@ def run_out_and_back_flight(
         stabilizer_monitor = StabilizerMonitor(scf, event_queue)
         stabilizer_monitor.start()
 
-        collision_monitor = CollisionMonitor(scf, event_queue, flight_state=flight_state)
+        adaptive_corrector = AdaptivePathCorrector(scf, flight_state)
+        controller = SafeFlightController(
+            path, flight_state=flight_state, adaptive_corrector=adaptive_corrector
+        )
+        collision_monitor = CollisionMonitor(
+            scf,
+            event_queue,
+            flight_state=flight_state,
+            adaptive_corrector=adaptive_corrector,
+        )
 
         stabilizer_monitor.wait_for_first_reading()
         initial_battery_v = stabilizer_monitor.state.battery_v
@@ -183,6 +192,7 @@ def run_out_and_back_flight(
                 # Start collision monitoring only once airborne — clearance check
                 # already guards pre-takeoff proximity, and ground-level sensor
                 # readings fluctuate and can spuriously trigger a COLLISION event.
+                adaptive_corrector.start()
                 collision_monitor.start()
                 collision_monitor.attach_motion_commander(mc)
                 logger.info("Airborne — stabilizing for 3 seconds...")
@@ -227,6 +237,8 @@ def run_out_and_back_flight(
             collision_monitor.detach_motion_commander()
             collision_monitor.stop()
             collision_monitor.join()
+            adaptive_corrector.stop()
+            adaptive_corrector.join()
             flight_time = time.time() - flight_start
             stabilizer_monitor.stop()
             stabilizer_monitor.join()

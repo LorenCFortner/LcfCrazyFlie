@@ -32,17 +32,23 @@ Example:
     >>> monitor.stop()
 """
 
+from __future__ import annotations
+
 import logging
 import math
 import queue
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
 from Crazyflie.state.flight_state import FlightState
+
+if TYPE_CHECKING:
+    from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +229,7 @@ class CollisionMonitor:
         event_queue: queue.Queue[str],
         min_distance_m: float = DEFAULT_MIN_DISTANCE_M,
         flight_state: FlightState | None = None,
+        adaptive_corrector: AdaptivePathCorrector | None = None,
     ) -> None:
         """Initialise the collision monitor.
 
@@ -234,11 +241,15 @@ class CollisionMonitor:
             flight_state: Optional shared flight state. When provided, the
                 detection threshold and avoidance parameters are computed from
                 the current velocity each poll cycle.
+            adaptive_corrector: Optional AdaptivePathCorrector. When provided,
+                normal detection is paused while a correction is executing,
+                unless any sensor reads below _SIDE_CLEARANCE_M.
         """
         self._scf = scf
         self._event_queue = event_queue
         self._min_distance_m = min_distance_m
         self._flight_state = flight_state
+        self._adaptive_corrector = adaptive_corrector
         self._stop_requested = False
         self._triggered = False
         self._mc: MotionCommander | None = None
@@ -497,6 +508,25 @@ class CollisionMonitor:
                     getattr(self._mc, direction)(avoid_distance_m, velocity=avoid_velocity)
         self._event_queue.put("COLLISION")
 
+    @staticmethod
+    def _any_below_blade_clearance(readings: MultiRangerReadings) -> bool:
+        """Return True if any sensor reads below the hard blade-clearance floor.
+
+        This is the safety floor that always fires — even when an adaptive
+        correction is executing — because a reading this close means blade
+        contact is imminent regardless of what the corrector is doing.
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if any valid sensor reading is below _SIDE_CLEARANCE_M.
+        """
+        for value in (readings.front, readings.back, readings.left, readings.right, readings.up):
+            if value is not None and 0.0 < value < _SIDE_CLEARANCE_M:
+                return True
+        return False
+
     def _run_once(self) -> None:
         """Perform a single poll cycle against an open MultiRangerDeck.
 
@@ -511,12 +541,16 @@ class CollisionMonitor:
         with MultiRangerDeck(self._scf) as ranger:
             if self._triggered:
                 return
+            readings = ranger.get_readings()
+            if self._adaptive_corrector is not None and self._adaptive_corrector.is_correcting():
+                if self._any_below_blade_clearance(readings):
+                    self._trigger(ranger)
+                return
             if self._flight_state is None:
                 threshold = self._min_distance_m
                 if ranger.is_obstacle_within(threshold):
                     self._trigger(ranger)
             else:
-                readings = ranger.get_readings()
                 if self._obstacle_detected(readings):
                     self._trigger(ranger)
                 elif not self._triggered and self._diagonal_detected(readings):
@@ -532,10 +566,18 @@ class CollisionMonitor:
         """
         with MultiRangerDeck(self._scf) as ranger:
             while not self._stop_requested:
+                readings = ranger.get_readings()
+                if (
+                    self._adaptive_corrector is not None
+                    and self._adaptive_corrector.is_correcting()
+                ):
+                    if self._any_below_blade_clearance(readings):
+                        self._trigger(ranger)
+                    time.sleep(_POLL_INTERVAL_S)
+                    continue
                 if self._flight_state is None:
                     threshold = self._min_distance_m
                     warn_threshold = threshold * 1.5
-                    readings = ranger.get_readings()
                     obstacle_detected = ranger.is_obstacle_within(threshold)
                     if not self._triggered and obstacle_detected:
                         self._trigger(ranger)
@@ -543,7 +585,6 @@ class CollisionMonitor:
                         _log_all_readings("Obstacle approaching", readings, threshold)
                 else:
                     threshold = self._effective_threshold()
-                    readings = ranger.get_readings()
                     obstacle_detected = self._obstacle_detected(readings)
                     if not self._triggered and obstacle_detected:
                         self._trigger(ranger)

@@ -1319,3 +1319,94 @@ class TestDiagonalFallbackAvoidance:
 
         velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
         assert velocity_kwarg == pytest.approx(1.66)
+
+
+# ---------------------------------------------------------------------------
+# AdaptivePathCorrector non-interference tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptivePause:
+    """CollisionMonitor pauses normal detection while a correction executes."""
+
+    def _make_monitor_with_adaptive(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        is_correcting: bool,
+        readings: MultiRangerReadings,
+    ):
+        mock_corrector = mocker.MagicMock()
+        mock_corrector.is_correcting.return_value = is_correcting
+
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = readings
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        mocker.patch("Crazyflie.safety.collision_monitor.time.sleep")
+
+        state = FlightState()
+        state.set_direction("forward")
+        state.set_velocity(0.3)
+
+        monitor = CollisionMonitor(
+            mock_scf,
+            event_queue,
+            flight_state=state,
+            adaptive_corrector=mock_corrector,
+        )
+        return monitor, mock_ranger, mock_corrector
+
+    def test_skips_poll_while_adaptive_is_correcting(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        """_trigger is never called when is_correcting() is True and all readings are safe."""
+        close_reading = _SIDE_CLEARANCE_M + 0.05  # in adaptive zone, safe from blades
+        readings = MultiRangerReadings(
+            front=close_reading, back=None, left=None, right=None, up=None
+        )
+        monitor, mock_ranger, mock_corrector = self._make_monitor_with_adaptive(
+            mock_scf, event_queue, mocker, is_correcting=True, readings=readings
+        )
+        trigger_spy = mocker.spy(monitor, "_trigger")
+
+        monitor._run_once()
+
+        trigger_spy.assert_not_called()
+
+    def test_resumes_detection_when_correcting_ends(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        """After is_correcting() returns False, a close sensor fires _trigger."""
+        very_close = 0.05  # below _SIDE_CLEARANCE_M — guaranteed collision
+        readings = MultiRangerReadings(front=very_close, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger, mock_corrector = self._make_monitor_with_adaptive(
+            mock_scf, event_queue, mocker, is_correcting=False, readings=readings
+        )
+        trigger_spy = mocker.spy(monitor, "_trigger")
+
+        monitor._run_once()
+
+        trigger_spy.assert_called_once()
+
+    def test_fires_immediately_when_below_side_clearance_even_during_adaptive(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        """Even with is_correcting()=True, a blade-level reading fires the collision."""
+        below_clearance = _SIDE_CLEARANCE_M * 0.5
+        readings = MultiRangerReadings(
+            front=None, back=None, left=below_clearance, right=None, up=None
+        )
+        monitor, mock_ranger, mock_corrector = self._make_monitor_with_adaptive(
+            mock_scf, event_queue, mocker, is_correcting=True, readings=readings
+        )
+        trigger_spy = mocker.spy(monitor, "_trigger")
+
+        monitor._run_once()
+
+        trigger_spy.assert_called_once()

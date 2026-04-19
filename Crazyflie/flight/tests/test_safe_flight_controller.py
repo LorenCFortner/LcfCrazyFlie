@@ -699,3 +699,101 @@ class TestDistanceTraveled:
         with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
             controller.run(mock_mc, should_abort=always_abort)
         assert controller.distance_traveled_m == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive correction tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveCorrection:
+    """_execute() integration with AdaptivePathCorrector."""
+
+    def _make_corrector(self, mocker, *, fires_once: bool = True):
+        """Return a mock corrector that fires a turn_left correction once."""
+        corrector = mocker.MagicMock()
+        corrector.is_correcting.return_value = False
+        if fires_once:
+            fired = {"done": False}
+
+            def _get_correction():
+                if not fired["done"]:
+                    fired["done"] = True
+                    return ("turn_left", 15.0)
+                return None
+
+            corrector.get_correction.side_effect = _get_correction
+        else:
+            corrector.get_correction.return_value = None
+        return corrector
+
+    def test_calls_begin_and_end_correction_around_nudge(self, mock_mc, mocker):
+        """begin_correction() called before mc.stop; end_correction() after turn."""
+        corrector = self._make_corrector(mocker)
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0)],
+            adaptive_corrector=corrector,
+        )
+        call_order = []
+        corrector.begin_correction.side_effect = lambda: call_order.append("begin")
+        mock_mc.stop.side_effect = lambda: call_order.append("stop")
+        corrector.end_correction.side_effect = lambda: call_order.append("end")
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            with patch("Crazyflie.flight.safe_flight_controller.time.monotonic", return_value=0.0):
+                controller.run(mock_mc, should_abort=never_abort)
+
+        assert "begin" in call_order
+        assert "end" in call_order
+        begin_idx = call_order.index("begin")
+        stop_idx = call_order.index("stop")
+        end_idx = call_order.index("end")
+        assert begin_idx < stop_idx < end_idx
+
+    def test_resumes_original_movement_after_adaptive_nudge(self, mock_mc, mocker):
+        """start_forward is called twice: initial + resume after nudge."""
+        corrector = self._make_corrector(mocker)
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0)],
+            adaptive_corrector=corrector,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            with patch("Crazyflie.flight.safe_flight_controller.time.monotonic", return_value=0.0):
+                controller.run(mock_mc, should_abort=never_abort)
+
+        assert mock_mc.start_forward.call_count == 2
+
+    def test_does_not_resume_if_should_abort_fires_during_nudge(self, mock_mc, mocker):
+        """After the nudge, if should_abort returns True, start_forward is NOT re-issued."""
+        corrector = self._make_corrector(mocker)
+        abort_after_end = {"fired": False}
+        corrector.end_correction.side_effect = lambda: abort_after_end.update({"fired": True})
+
+        def should_abort():
+            return abort_after_end["fired"]
+
+        controller = SafeFlightController(
+            [FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0)],
+            adaptive_corrector=corrector,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            with patch("Crazyflie.flight.safe_flight_controller.time.monotonic", return_value=0.0):
+                controller.run(mock_mc, should_abort=should_abort)
+
+        assert mock_mc.start_forward.call_count == 1
+
+    def test_does_not_check_adaptive_during_turns(self, mock_mc, mocker):
+        """get_correction() is never called when the command is turn_left."""
+        corrector = mocker.MagicMock()
+        corrector.get_correction.return_value = ("turn_left", 15.0)
+        controller = SafeFlightController(
+            [FlightStep("turn_left", 90.0, velocity=90.0, settle_s=0.0)],
+            adaptive_corrector=corrector,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        corrector.get_correction.assert_not_called()

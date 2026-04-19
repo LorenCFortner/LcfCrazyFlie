@@ -1,105 +1,260 @@
 """Collision monitor for Crazyflie 2.0.
 
 Monitors the Multi-ranger deck for obstacles and triggers an avoidance
-maneuver when anything comes within a configurable minimum distance.
+maneuver when anything comes within a velocity-dependent minimum distance.
+
+Detection threshold scales with the current flight velocity:
+    min_distance_m = max(BASE_DETECTION_M, velocity * REACTION_S)
 
 On collision:
   1. Calls mc.stop() immediately so physical movement ceases.
-  2. Moves the drone away from the obstacle by _AVOID_DISTANCE_M.
+  2. Moves the drone away from the obstacle (distance and speed also scale
+     with velocity).
   3. Posts "COLLISION" to the event queue so the script can land.
 
-The monitor only fires once per flight — set a new CollisionMonitor
-(or call reset()) for each new flight.
+When a FlightState is provided, the detection threshold and avoidance
+parameters are recomputed each poll cycle from the current velocity.
+Without a FlightState the static min_distance_m constructor argument is
+used, preserving the original hardcoded behavior.
+
+The monitor only fires once per flight — call reset() or create a new
+CollisionMonitor for each new flight.
 
 Example:
     >>> event_queue = queue.Queue()
-    >>> monitor = CollisionMonitor(scf, event_queue, min_distance_m=0.2)
+    >>> state = FlightState()
+    >>> monitor = CollisionMonitor(scf, event_queue, flight_state=state)
     >>> monitor.start()
     >>> with MotionCommander(scf) as mc:
     ...     monitor.attach_motion_commander(mc)
-    ...     runner.run_out_and_back(mc, should_abort=monitor.is_triggered)
+    ...     controller.run_out_and_back(mc, should_abort=monitor.is_triggered)
     ...     monitor.detach_motion_commander()
     >>> monitor.stop()
 """
 
+from __future__ import annotations
+
+import logging
+import math
 import queue
 import threading
 import time
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
+from Crazyflie.state.flight_state import FlightState
 
-DEFAULT_MIN_DISTANCE_M: float = 0.1
-_POLL_INTERVAL_S: float = 0.05  # 20 Hz
-_AVOID_DISTANCE_M: float = 0.2  # how far to back away from the obstacle
-_AVOID_VELOCITY: float = 0.3    # m/s during avoidance move
+if TYPE_CHECKING:
+    from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MIN_DISTANCE_M: float = 0.2  # kept for backward compat and clearance_check
+_POLL_INTERVAL_S: float = 0.10  # 10 Hz — matches Multi-ranger sensor refresh rate
+
+# Velocity-dependent threshold formula: max(_BASE_DETECTION_M, velocity * _REACTION_S)
+_REACTION_S: float = 0.65  # detection threshold scaling factor; formula activates above
+# ~0.38 m/s (BASE/REACTION_S crossover); at 0.6 m/s → 0.39 m, at 0.83 m/s → 0.54 m,
+# sized to absorb one poll-cycle of travel plus stopping distance at max speed
+_BASE_DETECTION_M: float = 0.25  # floor detection distance (empirically tuned: trigger at
+# ~0.23 m + ~80 mm coast = ~0.15 m stopping distance at 0.3 m/s)
+_BASE_AVOID_M: float = 0.20  # floor avoidance reversal distance
+_AVOID_REACTION_S: float = 0.60  # avoidance distance multiplier so reversal distance
+# scales with speed; at 0.6 m/s: max(0.20, 0.36) = 0.36 m at 1.2 m/s
+
+# Practical safe-speed cap — not derived from the formula crossover (crossover ≈ 0.42 m/s).
+# Above this speed, sensor latency + poll granularity make reliable stopping uncertain.
+MAX_SAFE_VELOCITY_M_S: float = 0.83
+
+# Fallback avoidance velocity used when no FlightState is provided.
+# Preserves the original hardcoded behavior for backward compatibility.
+_FALLBACK_AVOID_VELOCITY: float = 0.6
+
+# Fixed blade-clearance for non-flight-direction sensors.
+# Blade tips are ~5 cm from each sensor face; 5 cm × 2 sides = 10 cm minimum.
+_SIDE_CLEARANCE_M: float = 0.10
+
+# Maps SafeFlightController command names to MultiRangerReadings field names.
+# "down" is intentionally absent — the Flow deck owns that axis.
+_FLIGHT_DIR_TO_SENSOR: dict[str, str] = {
+    "forward": "front",
+    "back": "back",
+    "left": "left",
+    "right": "right",
+    "up": "up",
+}
+
+# Diagonal collision detection constants.
+# The blade centre-to-tip radius is 7 cm; minimum clearance from tip is 5 cm,
+# giving 12 cm total from drone centre to any obstacle at the 45° blade angle.
+_SENSOR_OFFSET_M: float = 0.017  # centre-to-sensor-face distance (1.7 cm)
+_DIAGONAL_BASE_M: float = 0.12  # blade radius (7 cm) + tip clearance (5 cm)
+
+# Reverse of each horizontal flight direction used as fallback avoidance when
+# the diagonal check fires but no individual sensor is below its threshold.
+_FLIGHT_DIR_REVERSE: dict[str, str] = {
+    "forward": "back",
+    "back": "forward",
+    "left": "right",
+    "right": "left",
+}
+
+# Maps horizontal flight directions to their two diagonal adjacent sensor pairs.
+# "up" is absent — blades are horizontal so there is no diagonal blade sweep
+# into vertical space. None direction is also absent (hover: no approach velocity).
+_DIAGONAL_PAIRS: dict[str, list[tuple[str, str]]] = {
+    "forward": [("front", "left"), ("front", "right")],
+    "back": [("back", "left"), ("back", "right")],
+    "left": [("left", "front"), ("left", "back")],
+    "right": [("right", "front"), ("right", "back")],
+}
 
 
 def find_avoidance_move(
     readings: MultiRangerReadings,
-    min_distance_m: float,
-) -> Optional[str]:
+    flight_direction: str | None,
+    dynamic_threshold: float,
+) -> str | None:
     """Return the MotionCommander method to move away from the nearest obstacle.
 
-    Checks sensors in priority order (front, back, left, right, up) and returns
-    the opposite direction for the first sensor closer than min_distance_m.
+    Checks sensors in priority order (front, back, left, right, up).
+    The sensor corresponding to ``flight_direction`` is checked against
+    ``dynamic_threshold``; all other sensors are checked against
+    ``_SIDE_CLEARANCE_M``.  When ``flight_direction`` is ``None`` every
+    sensor uses ``_SIDE_CLEARANCE_M``.
 
     Args:
         readings: Current MultiRangerReadings snapshot.
-        min_distance_m: Trigger threshold in metres.
+        flight_direction: Active flight-direction command name
+            ('forward', 'back', 'left', 'right', 'up'), or None when
+            hovering or turning.
+        dynamic_threshold: Velocity-dependent trigger threshold in metres,
+            applied only to the sensor that faces the flight direction.
 
     Returns:
         MotionCommander method name ('back', 'forward', 'right', 'left', 'down'),
-        or None if no sensor is below the threshold.
+        or None if no sensor is below its threshold.
     """
+    active_sensor = _FLIGHT_DIR_TO_SENSOR.get(flight_direction or "")
     checks = [
-        (readings.front, "back"),
-        (readings.back,  "forward"),
-        (readings.left,  "right"),
-        (readings.right, "left"),
-        (readings.up,    "down"),
+        (readings.front, "front", "back"),
+        (readings.back, "back", "forward"),
+        (readings.left, "left", "right"),
+        (readings.right, "right", "left"),
+        (readings.up, "up", "down"),
     ]
-    for value, direction in checks:
-        if value is not None and 0.0 < value < min_distance_m:
-            return direction
+    for value, sensor_name, avoidance in checks:
+        if value is None or value <= 0.0:
+            continue
+        threshold = dynamic_threshold if sensor_name == active_sensor else _SIDE_CLEARANCE_M
+        if value < threshold:
+            return avoidance
     return None
+
+
+def _log_all_readings(
+    label: str,
+    readings: MultiRangerReadings,
+    threshold_m: float,
+) -> None:
+    """Log all ranger distances with a context label.
+
+    Args:
+        label: Prefix shown before the sensor values.
+        readings: Current MultiRangerReadings snapshot.
+        threshold_m: Trigger threshold, shown alongside readings for context.
+    """
+
+    def _fmt(v: float | None) -> str:
+        return f"{v:.3f} m" if v is not None else "  None"
+
+    logger.warning(
+        "%s (threshold %.3f m) — front=%s  back=%s  left=%s  right=%s  up=%s",
+        label,
+        threshold_m,
+        _fmt(readings.front),
+        _fmt(readings.back),
+        _fmt(readings.left),
+        _fmt(readings.right),
+        _fmt(readings.up),
+    )
+
+
+def _diagonal_distance(a: float | None, b: float | None) -> float | None:
+    """Pythagorean distance from drone centre for a sensor pair.
+
+    Adds _SENSOR_OFFSET_M to each raw reading before computing the hypotenuse,
+    converting from sensor-face distance to drone-centre distance.
+
+    Returns None when either reading is None or <= 0 (sensor not detecting or
+    touching the face), since the distance would be meaningless.
+
+    Args:
+        a: First sensor reading in metres (distance from sensor face).
+        b: Second sensor reading in metres (distance from sensor face).
+
+    Returns:
+        Pythagorean distance from drone centre in metres, or None for invalid
+        input.
+    """
+    if a is None or a <= 0.0 or b is None or b <= 0.0:
+        return None
+    return math.sqrt((a + _SENSOR_OFFSET_M) ** 2 + (b + _SENSOR_OFFSET_M) ** 2)
 
 
 class CollisionMonitor:
     """Monitors Multi-ranger distances and stops the drone on obstacle detection.
 
-    Runs in a background thread. When any sensor reads closer than
-    min_distance_m, the monitor immediately calls mc.stop() (if a
-    MotionCommander is attached) and posts "COLLISION" to the event queue.
+    Runs in a background thread. When any sensor reads closer than the
+    velocity-dependent threshold, the monitor immediately calls mc.stop()
+    (if a MotionCommander is attached) and posts "COLLISION" to the event queue.
 
-    The is_triggered() method can be passed as the should_abort callable
-    to PathRunner so path execution halts at the next step boundary.
+    Detection threshold formula (when FlightState is provided):
+        threshold = max(_BASE_DETECTION_M, velocity * _REACTION_S)
+
+    When no FlightState is provided, the static min_distance_m constructor
+    argument is used as the threshold — this preserves the original behavior
+    and keeps existing callers unchanged.
+
+    NOTE: When a FlightState IS provided, min_distance_m is ignored entirely.
+    The dynamic formula takes over. Document this at each call site.
     """
 
     def __init__(
         self,
         scf: SyncCrazyflie,
-        event_queue: queue.Queue,
+        event_queue: queue.Queue[str],
         min_distance_m: float = DEFAULT_MIN_DISTANCE_M,
+        flight_state: FlightState | None = None,
+        adaptive_corrector: AdaptivePathCorrector | None = None,
     ) -> None:
         """Initialise the collision monitor.
 
         Args:
             scf: Connected SyncCrazyflie instance.
             event_queue: Queue to post "COLLISION" messages to.
-            min_distance_m: Minimum safe distance in metres. Defaults to 0.1.
+            min_distance_m: Static threshold in metres. Used only when
+                flight_state is None. Ignored when flight_state is provided.
+            flight_state: Optional shared flight state. When provided, the
+                detection threshold and avoidance parameters are computed from
+                the current velocity each poll cycle.
+            adaptive_corrector: Optional AdaptivePathCorrector. When provided,
+                normal detection is paused while a correction is executing,
+                unless any sensor reads below _SIDE_CLEARANCE_M.
         """
         self._scf = scf
         self._event_queue = event_queue
         self._min_distance_m = min_distance_m
+        self._flight_state = flight_state
+        self._adaptive_corrector = adaptive_corrector
         self._stop_requested = False
         self._triggered = False
-        self._mc: Optional[MotionCommander] = None
+        self._mc: MotionCommander | None = None
         self._lock = threading.Lock()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     def attach_motion_commander(self, mc: MotionCommander) -> None:
         """Attach a MotionCommander so movement stops immediately on collision.
@@ -155,11 +310,165 @@ class CollisionMonitor:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
 
+    @staticmethod
+    def _compute_threshold(velocity: float) -> float:
+        """Compute the detection threshold for the given velocity.
+
+        Uses the formula: max(_BASE_DETECTION_M, velocity * _REACTION_S)
+
+        Args:
+            velocity: Current flight velocity in m/s.
+
+        Returns:
+            Detection distance in metres.
+        """
+        return max(_BASE_DETECTION_M, velocity * _REACTION_S)
+
+    def _effective_threshold(self) -> float:
+        """Return the detection threshold to use for the current poll cycle.
+
+        Returns:
+            Dynamic threshold from FlightState if provided; otherwise the
+            static min_distance_m passed at construction.
+        """
+        if self._flight_state is not None:
+            return self._compute_threshold(self._flight_state.get_velocity())
+        return self._min_distance_m
+
+    def _effective_flight_direction(self) -> str | None:
+        """Return the current flight direction from FlightState, or None.
+
+        Returns:
+            Direction string from FlightState if provided, else None.
+        """
+        if self._flight_state is not None:
+            return self._flight_state.get_direction()
+        return None
+
+    def _effective_diagonal_threshold(self) -> float:
+        """Return the diagonal detection threshold for the current poll cycle.
+
+        Uses an additive formula so the threshold is always larger than the
+        leading sensor's direct threshold:
+
+            threshold = _DIAGONAL_BASE_M + _compute_threshold(velocity)
+
+        This ensures that when the drone stops (consuming the reaction distance),
+        the remaining distance to a diagonal corner equals _DIAGONAL_BASE_M (12 cm),
+        which is the blade radius (7 cm) plus the required 5 cm tip clearance.
+
+        Returns:
+            Diagonal detection threshold in metres.
+        """
+        velocity = self._flight_state.get_velocity() if self._flight_state is not None else 0.0
+        return _DIAGONAL_BASE_M + self._compute_threshold(velocity)
+
+    def _diagonal_detected(self, readings: MultiRangerReadings) -> bool:
+        """Return True if any diagonal sensor pair is within the diagonal threshold.
+
+        Checks the two pairs of (leading sensor, adjacent sensor) for the current
+        flight direction using Pythagorean distance from drone centre.  Only active
+        for horizontal flight directions (forward/back/left/right).  Excluded for
+        "up" (blades are horizontal) and None direction (no approach velocity).
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if any diagonal pair indicates a nearby obstacle.
+        """
+        direction = self._effective_flight_direction()
+        if direction not in _DIAGONAL_PAIRS:
+            return False
+        threshold = self._effective_diagonal_threshold()
+        for sensor_a, sensor_b in _DIAGONAL_PAIRS[direction]:
+            a = getattr(readings, sensor_a)
+            b = getattr(readings, sensor_b)
+            dist = _diagonal_distance(a, b)
+            if dist is not None and dist < threshold:
+                return True
+        return False
+
+    def _diagonal_warn_detected(self, readings: MultiRangerReadings) -> bool:
+        """Return True if any diagonal pair is within 1.5× the diagonal threshold.
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if any diagonal pair is within its warning distance.
+        """
+        direction = self._effective_flight_direction()
+        if direction not in _DIAGONAL_PAIRS:
+            return False
+        warn_threshold = self._effective_diagonal_threshold() * 1.5
+        for sensor_a, sensor_b in _DIAGONAL_PAIRS[direction]:
+            a = getattr(readings, sensor_a)
+            b = getattr(readings, sensor_b)
+            dist = _diagonal_distance(a, b)
+            if dist is not None and dist < warn_threshold:
+                return True
+        return False
+
+    def _obstacle_detected(self, readings: MultiRangerReadings) -> bool:
+        """Return True if any sensor reading exceeds its threshold.
+
+        When FlightState is provided, uses per-sensor directional logic:
+        the flight-direction sensor uses the dynamic velocity-based threshold;
+        all other sensors use _SIDE_CLEARANCE_M.
+
+        When FlightState is None (backward-compat mode), falls back to
+        ranger.is_obstacle_within with the static min_distance_m.
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if an obstacle is within threshold distance.
+        """
+        direction = self._effective_flight_direction()
+        dynamic_threshold = self._effective_threshold()
+        return find_avoidance_move(readings, direction, dynamic_threshold) is not None
+
+    def _warn_detected(self, readings: MultiRangerReadings) -> bool:
+        """Return True if any sensor is within its 1.5× warning threshold.
+
+        Applies the same directional logic as _obstacle_detected but with
+        each per-sensor threshold scaled by 1.5 to give early warning.
+        The flight-direction sensor warns at dynamic_threshold × 1.5; all
+        other sensors warn at _SIDE_CLEARANCE_M × 1.5.
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if any sensor is within its warning distance.
+        """
+        direction = self._effective_flight_direction()
+        dynamic_warn = self._effective_threshold() * 1.5
+        active_sensor = _FLIGHT_DIR_TO_SENSOR.get(direction or "")
+        checks = [
+            (readings.front, "front"),
+            (readings.back, "back"),
+            (readings.left, "left"),
+            (readings.right, "right"),
+            (readings.up, "up"),
+        ]
+        for value, sensor_name in checks:
+            if value is None or value <= 0.0:
+                continue
+            warn_threshold = (
+                dynamic_warn if sensor_name == active_sensor else _SIDE_CLEARANCE_M * 1.5
+            )
+            if value < warn_threshold:
+                return True
+        return self._diagonal_warn_detected(readings)
+
     def _trigger(self, ranger: MultiRangerDeck) -> None:
         """Fire the collision response if not already triggered.
 
-        Stops the drone, moves it away from the obstacle, then posts
-        "COLLISION" to the event queue so the script can land.
+        Stops the drone, moves it away from the obstacle using velocity-scaled
+        avoidance parameters, then posts "COLLISION" to the event queue.
 
         Separated from _run() so it can be exercised in unit tests
         without starting a real background thread.
@@ -170,33 +479,117 @@ class CollisionMonitor:
         if self._triggered:
             return
         self._triggered = True
+
+        readings = ranger.get_readings()
+        threshold = self._effective_threshold()
+        _log_all_readings("COLLISION triggered", readings, threshold)
+
         with self._lock:
             if self._mc is not None:
                 self._mc.stop()
-                direction = find_avoidance_move(
-                    ranger.get_readings(), self._min_distance_m
-                )
+                flight_direction = self._effective_flight_direction()
+                direction = find_avoidance_move(readings, flight_direction, threshold)
+                if direction is None and flight_direction in _DIAGONAL_PAIRS:
+                    direction = _FLIGHT_DIR_REVERSE.get(flight_direction)
                 if direction is not None:
-                    getattr(self._mc, direction)(
-                        _AVOID_DISTANCE_M, velocity=_AVOID_VELOCITY
+                    if self._flight_state is not None:
+                        velocity = self._flight_state.get_velocity()
+                        avoid_distance_m = max(_BASE_AVOID_M, velocity * _AVOID_REACTION_S)
+                        avoid_velocity = velocity * 2.0
+                    else:
+                        avoid_distance_m = _BASE_AVOID_M
+                        avoid_velocity = _FALLBACK_AVOID_VELOCITY
+                    logger.warning(
+                        "Avoidance: moving %s %.2f m at %.1f m/s",
+                        direction,
+                        avoid_distance_m,
+                        avoid_velocity,
                     )
+                    getattr(self._mc, direction)(avoid_distance_m, velocity=avoid_velocity)
         self._event_queue.put("COLLISION")
+
+    @staticmethod
+    def _any_below_blade_clearance(readings: MultiRangerReadings) -> bool:
+        """Return True if any sensor reads below the hard blade-clearance floor.
+
+        This is the safety floor that always fires — even when an adaptive
+        correction is executing — because a reading this close means blade
+        contact is imminent regardless of what the corrector is doing.
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+
+        Returns:
+            True if any valid sensor reading is below _SIDE_CLEARANCE_M.
+        """
+        for value in (readings.front, readings.back, readings.left, readings.right, readings.up):
+            if value is not None and 0.0 < value < _SIDE_CLEARANCE_M:
+                return True
+        return False
 
     def _run_once(self) -> None:
         """Perform a single poll cycle against an open MultiRangerDeck.
 
         Opens its own MultiRangerDeck context. Intended for unit tests
         that need to exercise the poll logic without a running thread.
+
+        When FlightState is None (backward-compat mode), uses
+        ranger.is_obstacle_within with the static min_distance_m.
+        When FlightState is provided, uses per-sensor directional logic via
+        ranger.get_readings() and find_avoidance_move.
         """
         with MultiRangerDeck(self._scf) as ranger:
-            if not self._triggered and ranger.is_obstacle_within(self._min_distance_m):
-                self._trigger(ranger)
+            if self._triggered:
+                return
+            readings = ranger.get_readings()
+            if self._adaptive_corrector is not None and self._adaptive_corrector.is_correcting():
+                if self._any_below_blade_clearance(readings):
+                    self._trigger(ranger)
+                return
+            if self._flight_state is None:
+                threshold = self._min_distance_m
+                if ranger.is_obstacle_within(threshold):
+                    self._trigger(ranger)
+            else:
+                if self._obstacle_detected(readings):
+                    self._trigger(ranger)
+                elif not self._triggered and self._diagonal_detected(readings):
+                    self._trigger(ranger)
 
     def _run(self) -> None:
-        """Background thread: polls Multi-ranger and reacts to obstacles."""
+        """Background thread: polls Multi-ranger and reacts to obstacles.
+
+        When FlightState is None (backward-compat mode), uses
+        ranger.is_obstacle_within with the static min_distance_m.
+        When FlightState is provided, uses per-sensor directional logic via
+        ranger.get_readings() and find_avoidance_move.
+        """
         with MultiRangerDeck(self._scf) as ranger:
             while not self._stop_requested:
-                obstacle_detected = ranger.is_obstacle_within(self._min_distance_m)
-                if not self._triggered and obstacle_detected:
-                    self._trigger(ranger)
+                readings = ranger.get_readings()
+                if (
+                    self._adaptive_corrector is not None
+                    and self._adaptive_corrector.is_correcting()
+                ):
+                    if self._any_below_blade_clearance(readings):
+                        self._trigger(ranger)
+                    time.sleep(_POLL_INTERVAL_S)
+                    continue
+                if self._flight_state is None:
+                    threshold = self._min_distance_m
+                    warn_threshold = threshold * 1.5
+                    obstacle_detected = ranger.is_obstacle_within(threshold)
+                    if not self._triggered and obstacle_detected:
+                        self._trigger(ranger)
+                    elif not self._triggered and ranger.is_obstacle_within(warn_threshold):
+                        _log_all_readings("Obstacle approaching", readings, threshold)
+                else:
+                    threshold = self._effective_threshold()
+                    obstacle_detected = self._obstacle_detected(readings)
+                    if not self._triggered and obstacle_detected:
+                        self._trigger(ranger)
+                    elif not self._triggered and self._diagonal_detected(readings):
+                        self._trigger(ranger)
+                    elif not self._triggered and self._warn_detected(readings):
+                        _log_all_readings("Obstacle approaching", readings, threshold)
                 time.sleep(_POLL_INTERVAL_S)

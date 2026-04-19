@@ -1,0 +1,28 @@
+[tool.ruff]
+line-length = 99
+target-version = "py314"
+exclude = ["Spikes", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "B", "C4"]
+ignore = ["E501", "N999"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["Spikes/", ".venv/"]
+
+[[tool.mypy.overrides]]
+module = [
+    "Crazyflie.conftest",
+    "Crazyflie.*.tests.*",
+    "Crazyflie.*.*.tests.*",
+]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_return_any = false
+disallow_any_generics = false

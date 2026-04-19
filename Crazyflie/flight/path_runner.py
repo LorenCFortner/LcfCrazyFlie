@@ -10,15 +10,14 @@ from typing import Callable, Optional
 
 from cflib.positioning.motion_commander import MotionCommander
 
-
 _REVERSE_DIRECTION: dict[str, str] = {
-    "forward":    "back",
-    "back":       "forward",
-    "left":       "right",
-    "right":      "left",
-    "up":         "down",
-    "down":       "up",
-    "turn_left":  "turn_right",
+    "forward": "back",
+    "back": "forward",
+    "left": "right",
+    "right": "left",
+    "up": "down",
+    "down": "up",
+    "turn_left": "turn_right",
     "turn_right": "turn_left",
 }
 
@@ -26,13 +25,13 @@ _REVERSE_DIRECTION: dict[str, str] = {
 # up/down already map correctly. Only lateral and rotational commands need
 # swapping to trace the mirror of the outbound path.
 _TURN_AROUND_INVERSION: dict[str, str] = {
-    "forward":    "forward",
-    "back":       "back",
-    "left":       "right",
-    "right":      "left",
-    "up":         "up",
-    "down":       "down",
-    "turn_left":  "turn_right",
+    "forward": "forward",
+    "back": "back",
+    "left": "right",
+    "right": "left",
+    "up": "up",
+    "down": "down",
+    "turn_left": "turn_right",
     "turn_right": "turn_left",
 }
 
@@ -50,6 +49,7 @@ class FlightStep:
         velocity: Movement velocity in m/s. Defaults to 0.5.
         settle_s: Pause after the move to let the drone stabilise.
     """
+
     command: str
     distance_m: float
     velocity: float = 0.5

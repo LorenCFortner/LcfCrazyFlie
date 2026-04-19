@@ -37,11 +37,15 @@ def deck_with_data(entered_deck):
     cb = mock_lc.data_received_cb.add_callback.call_args[0][0]
 
     def fire(height_mm: float = 500, delta_x: int = 0, delta_y: int = 0) -> None:
-        cb(1000, {
-            "range.zrange": height_mm,
-            "motion.deltaX": delta_x,
-            "motion.deltaY": delta_y,
-        }, mock_lc)
+        cb(
+            1000,
+            {
+                "range.zrange": height_mm,
+                "motion.deltaX": delta_x,
+                "motion.deltaY": delta_y,
+            },
+            mock_lc,
+        )
 
     return deck, fire
 

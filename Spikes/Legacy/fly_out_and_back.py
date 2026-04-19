@@ -20,12 +20,14 @@ from Crazyflie.decks.led_ring import LedRingDeck
 from Crazyflie.flight.path_runner import FlightStep, PathRunner
 from Crazyflie.safety.collision_monitor import CollisionMonitor
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
+from Crazyflie.safety.takeoff_verifier import verify_takeoff
 from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
 # Radio connection — adjust channel/bitrate to match your Crazyradio config.
 URI = "radio://0/1/250K"
+_POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
 
-logging.basicConfig(level=logging.ERROR)
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Flight path — 1 metre out; run_out_and_back() handles the return leg.
@@ -38,6 +40,7 @@ OUT_AND_BACK_PATH = [
 # ---------------------------------------------------------------------------
 # Pre / post flight helpers
 # ---------------------------------------------------------------------------
+
 
 def pre_flight(scf: SyncCrazyflie) -> None:
     """Arm the LED ring before takeoff.
@@ -63,8 +66,9 @@ def post_flight(scf: SyncCrazyflie) -> None:
 # Safety event loop
 # ---------------------------------------------------------------------------
 
+
 def handle_safety_events(
-    event_queue: queue.Queue,
+    event_queue: queue.Queue[str],
     mc: MotionCommander,
     scf: SyncCrazyflie,
     monitor: StabilizerMonitor,
@@ -85,20 +89,20 @@ def handle_safety_events(
     except queue.Empty:
         return False
 
-    print(f"Safety event received: {event}")
+    logger.info(f"Safety event received: {event}")
     monitor.stop()
 
     if event == "CRASH":
-        print("CRASH detected — emergency landing.")
+        logger.warning("CRASH detected — emergency landing.")
         land_immediately(mc)
     elif event == "BATLOW":
-        print("Low battery — landing now.")
+        logger.warning("Low battery — landing now.")
         land_on_low_battery(mc)
     elif event == "COLLISION":
-        print("Obstacle detected — avoidance complete, landing now.")
+        logger.warning("Obstacle detected — avoidance complete, landing now.")
         land_immediately(mc)
     else:
-        print(f"Unknown event '{event}' — landing immediately as precaution.")
+        logger.warning(f"Unknown event '{event}' — landing immediately as precaution.")
         land_immediately(mc)
 
     return True
@@ -108,16 +112,21 @@ def handle_safety_events(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     """Main entry point for the fly-out-and-back script."""
+    logging.basicConfig(level=logging.ERROR)
+    logging.getLogger("cflib").setLevel(logging.CRITICAL)
+    logging.getLogger(__name__).setLevel(logging.INFO)
+
     cflib.crtp.init_drivers(enable_debug_driver=False)
 
-    event_queue: queue.Queue = queue.Queue()
+    event_queue: queue.Queue[str] = queue.Queue()
     runner = PathRunner(OUT_AND_BACK_PATH)
 
-    print(f"Connecting to {URI}...")
+    logger.info(f"Connecting to {URI}...")
     with SyncCrazyflie(URI) as scf:
-        print("Connected.")
+        logger.info("Connected.")
         scf.cf.commander.send_stop_setpoint()
         scf.cf.commander.send_notify_setpoint_stop()
         scf.cf.platform.send_arming_request(True)
@@ -132,25 +141,37 @@ def main() -> None:
 
         # Give the monitor one poll cycle to read initial telemetry.
         time.sleep(0.15)
-        print(f"Battery: {stabilizer_monitor.state.battery_v:.2f} V")
+        initial_battery_v = stabilizer_monitor.state.battery_v
+        initial_height_mm = stabilizer_monitor.state.height_mm
+        logger.info(f"Battery: {initial_battery_v:.2f} V")
 
         flight_start = time.time()
 
         try:
             with MotionCommander(scf) as mc:
                 collision_monitor.attach_motion_commander(mc)
-                print("Airborne — stabilizing for 3 seconds...")
+                logger.info("Airborne — stabilizing for 3 seconds...")
                 for i in range(3):
                     time.sleep(1.0)
                     height_cm = stabilizer_monitor.state.height_mm / 10.0
                     batt = stabilizer_monitor.state.battery_v
-                    print(f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V")
-                print("Flying out 1 metre and back...")
+                    logger.info(
+                        f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm | battery: {batt:.2f} V"
+                    )
+
+                if not verify_takeoff(
+                    height_mm=stabilizer_monitor.state.height_mm,
+                    battery_v=stabilizer_monitor.state.battery_v,
+                    initial_height_mm=initial_height_mm,
+                    initial_battery_v=initial_battery_v,
+                ):
+                    return
+
+                logger.info("Flying out 1 metre and back...")
                 runner.run_out_and_back(
                     mc,
                     should_abort=lambda: (
-                        collision_monitor.is_triggered()
-                        or stabilizer_monitor.is_triggered()
+                        collision_monitor.is_triggered() or stabilizer_monitor.is_triggered()
                     ),
                 )
                 collision_monitor.detach_motion_commander()
@@ -160,10 +181,10 @@ def main() -> None:
                     if handle_safety_events(event_queue, mc, scf, stabilizer_monitor):
                         break
 
-                print("Route complete — landing.")
+                logger.info("Route complete — landing.")
 
         except Exception as exc:
-            print(f"Flight error: {exc}")
+            logger.error(f"Flight error: {exc}")
         finally:
             collision_monitor.detach_motion_commander()
             collision_monitor.stop()
@@ -180,7 +201,9 @@ def main() -> None:
                 scf.cf.commander.send_notify_setpoint_stop()
             except Exception:
                 pass
-            print(f"Total flight time: {flight_time:.1f} s")
+            logger.info(f"Total flight time: {flight_time:.1f} s")
+
+    time.sleep(_POST_DISCONNECT_SLEEP_S)
 
 
 if __name__ == "__main__":

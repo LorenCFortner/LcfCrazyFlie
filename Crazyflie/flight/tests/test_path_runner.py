@@ -3,23 +3,27 @@
 Written test-first (TDD).
 """
 
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import call, patch, MagicMock
 
 from Crazyflie.flight.path_runner import FlightStep, PathRunner
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def single_step(command: str, distance: float = 1.0, velocity: float = 0.5, settle_s: float = 0.0) -> PathRunner:
+
+def single_step(
+    command: str, distance: float = 1.0, velocity: float = 0.5, settle_s: float = 0.0
+) -> PathRunner:
     return PathRunner([FlightStep(command, distance, velocity, settle_s)])
 
 
 # ---------------------------------------------------------------------------
 # run() — forward execution
 # ---------------------------------------------------------------------------
+
 
 class TestRun:
     def test_forward_calls_mc_forward(self, mock_mc):
@@ -68,11 +72,13 @@ class TestRun:
         mock_mc.forward.assert_called_once_with(1.5, velocity=0.8)
 
     def test_executes_steps_in_order(self, mock_mc):
-        path = PathRunner([
-            FlightStep("forward", 1.0, settle_s=0.0),
-            FlightStep("left",    0.5, settle_s=0.0),
-            FlightStep("up",      0.3, settle_s=0.0),
-        ])
+        path = PathRunner(
+            [
+                FlightStep("forward", 1.0, settle_s=0.0),
+                FlightStep("left", 0.5, settle_s=0.0),
+                FlightStep("up", 0.3, settle_s=0.0),
+            ]
+        )
 
         path.run(mock_mc)
 
@@ -81,10 +87,12 @@ class TestRun:
         assert mock_mc.method_calls[2][0] == "up"
 
     def test_sleeps_after_each_step(self, mock_mc):
-        path = PathRunner([
-            FlightStep("forward", 1.0, settle_s=0.5),
-            FlightStep("left",    0.5, settle_s=0.3),
-        ])
+        path = PathRunner(
+            [
+                FlightStep("forward", 1.0, settle_s=0.5),
+                FlightStep("left", 0.5, settle_s=0.3),
+            ]
+        )
 
         with patch("Crazyflie.flight.path_runner.time.sleep") as mock_sleep:
             path.run(mock_mc)
@@ -103,12 +111,15 @@ class TestRun:
 # run_reversed() — reversed execution with inverted directions
 # ---------------------------------------------------------------------------
 
+
 class TestRunReversed:
     def test_reverses_step_order(self, mock_mc):
-        path = PathRunner([
-            FlightStep("forward", 1.0, settle_s=0.0),
-            FlightStep("left",    0.5, settle_s=0.0),
-        ])
+        path = PathRunner(
+            [
+                FlightStep("forward", 1.0, settle_s=0.0),
+                FlightStep("left", 0.5, settle_s=0.0),
+            ]
+        )
 
         path.run_reversed(mock_mc)
 
@@ -116,16 +127,19 @@ class TestRunReversed:
         assert mock_mc.method_calls[0][0] == "right"
         assert mock_mc.method_calls[1][0] == "back"
 
-    @pytest.mark.parametrize("original,expected_inverse", [
-        ("forward",    "back"),
-        ("back",       "forward"),
-        ("left",       "right"),
-        ("right",      "left"),
-        ("up",         "down"),
-        ("down",       "up"),
-        ("turn_left",  "turn_right"),
-        ("turn_right", "turn_left"),
-    ])
+    @pytest.mark.parametrize(
+        "original,expected_inverse",
+        [
+            ("forward", "back"),
+            ("back", "forward"),
+            ("left", "right"),
+            ("right", "left"),
+            ("up", "down"),
+            ("down", "up"),
+            ("turn_left", "turn_right"),
+            ("turn_right", "turn_left"),
+        ],
+    )
     def test_inverts_direction(self, mock_mc, original, expected_inverse):
         single_step(original).run_reversed(mock_mc)
 
@@ -138,10 +152,12 @@ class TestRunReversed:
         mock_mc.back.assert_called_once_with(2.0, velocity=0.7)
 
     def test_sleeps_after_each_reversed_step(self, mock_mc):
-        path = PathRunner([
-            FlightStep("forward", 1.0, settle_s=0.4),
-            FlightStep("left",    0.5, settle_s=0.2),
-        ])
+        path = PathRunner(
+            [
+                FlightStep("forward", 1.0, settle_s=0.4),
+                FlightStep("left", 0.5, settle_s=0.2),
+            ]
+        )
 
         with patch("Crazyflie.flight.path_runner.time.sleep") as mock_sleep:
             path.run_reversed(mock_mc)
@@ -159,12 +175,15 @@ class TestRunReversed:
 # turn_left/turn_right swapped (forward/back/up/down unchanged)
 # ---------------------------------------------------------------------------
 
+
 class TestRunOutAndBack:
     def test_executes_steps_forward_first(self, mock_mc):
-        path = PathRunner([
-            FlightStep("forward", 1.0, settle_s=0.0),
-            FlightStep("left",    0.5, settle_s=0.0),
-        ])
+        path = PathRunner(
+            [
+                FlightStep("forward", 1.0, settle_s=0.0),
+                FlightStep("left", 0.5, settle_s=0.0),
+            ]
+        )
 
         path.run_out_and_back(mock_mc)
 
@@ -180,14 +199,16 @@ class TestRunOutAndBack:
         # Find the turn_right(180, ...) call
         turn_calls = [c for c in mock_mc.method_calls if c[0] == "turn_right"]
         assert len(turn_calls) == 1
-        args, kwargs = turn_calls[0][1], turn_calls[0][2]
+        args = turn_calls[0][1]
         assert args[0] == 180
 
     def test_return_leg_is_in_reverse_step_order(self, mock_mc):
-        path = PathRunner([
-            FlightStep("forward", 1.0, settle_s=0.0),
-            FlightStep("forward", 0.5, settle_s=0.0),
-        ])
+        path = PathRunner(
+            [
+                FlightStep("forward", 1.0, settle_s=0.0),
+                FlightStep("forward", 0.5, settle_s=0.0),
+            ]
+        )
 
         path.run_out_and_back(mock_mc)
 
@@ -227,8 +248,8 @@ class TestRunOutAndBack:
 
         left_calls = [c for c in mock_mc.method_calls if c[0] == "left"]
         right_calls = [c for c in mock_mc.method_calls if c[0] == "right"]
-        assert len(left_calls) == 1    # outbound only
-        assert len(right_calls) == 1   # return only
+        assert len(left_calls) == 1  # outbound only
+        assert len(right_calls) == 1  # return only
 
     def test_right_is_inverted_to_left_on_return(self, mock_mc):
         path = PathRunner([FlightStep("right", 1.0, settle_s=0.0)])
@@ -308,6 +329,7 @@ class TestRunOutAndBack:
 # should_abort — early exit when callable returns True
 # ---------------------------------------------------------------------------
 
+
 class TestShouldAbort:
     def test_run_stops_before_first_step_when_abort_true(self, mock_mc):
         PathRunner([FlightStep("forward", 1.0, settle_s=0.0)]).run(
@@ -330,10 +352,12 @@ class TestShouldAbort:
             call_count[0] += 1
             return call_count[0] > 1
 
-        PathRunner([
-            FlightStep("forward", 1.0, settle_s=0.0),
-            FlightStep("left",    0.5, settle_s=0.0),
-        ]).run(mock_mc, should_abort=abort_after_one)
+        PathRunner(
+            [
+                FlightStep("forward", 1.0, settle_s=0.0),
+                FlightStep("left", 0.5, settle_s=0.0),
+            ]
+        ).run(mock_mc, should_abort=abort_after_one)
 
         mock_mc.forward.assert_called_once()
         mock_mc.left.assert_not_called()
@@ -351,8 +375,6 @@ class TestShouldAbort:
 
         def abort_after_outbound():
             return outbound_done[0]
-
-        original_forward = mock_mc.forward.side_effect
 
         def mark_outbound(*args, **kwargs):
             outbound_done[0] = True
@@ -375,10 +397,12 @@ class TestShouldAbort:
         mock_mc.back.assert_not_called()
 
     def test_run_without_should_abort_runs_normally(self, mock_mc):
-        PathRunner([
-            FlightStep("forward", 1.0, settle_s=0.0),
-            FlightStep("left",    0.5, settle_s=0.0),
-        ]).run(mock_mc)
+        PathRunner(
+            [
+                FlightStep("forward", 1.0, settle_s=0.0),
+                FlightStep("left", 0.5, settle_s=0.0),
+            ]
+        ).run(mock_mc)
 
         mock_mc.forward.assert_called_once()
         mock_mc.left.assert_called_once()

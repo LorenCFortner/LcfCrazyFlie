@@ -3,18 +3,23 @@
 Written test-first following the TDD rules for this project.
 """
 
+import math
 import queue
-import threading
-import time
+from typing import Any
 
 import pytest
 
 from Crazyflie.decks.multi_ranger import MultiRangerReadings
 from Crazyflie.safety.collision_monitor import (
-    CollisionMonitor,
+    _DIAGONAL_BASE_M,
+    _SENSOR_OFFSET_M,
+    _SIDE_CLEARANCE_M,
     DEFAULT_MIN_DISTANCE_M,
+    CollisionMonitor,
+    _diagonal_distance,
     find_avoidance_move,
 )
+from Crazyflie.state.flight_state import FlightState
 
 
 @pytest.fixture
@@ -33,6 +38,11 @@ def mock_ranger(mocker):
     ranger.__enter__ = mocker.MagicMock(return_value=ranger)
     ranger.__exit__ = mocker.MagicMock(return_value=False)
     ranger.is_obstacle_within.return_value = False
+    # get_readings() must return a real MultiRangerReadings so _log_all_readings
+    # can format the float fields without TypeError from MagicMock.__format__.
+    ranger.get_readings.return_value = MultiRangerReadings(
+        front=0.05, back=None, left=None, right=None, up=None
+    )
     return ranger
 
 
@@ -43,39 +53,37 @@ def monitor_with_ranger(mock_scf, event_queue, mock_ranger, mocker):
     return monitor, mock_ranger, event_queue
 
 
-def _readings(
-    front=None, back=None, left=None, right=None, up=None
-) -> MultiRangerReadings:
+def _readings(front=None, back=None, left=None, right=None, up=None) -> MultiRangerReadings:
     return MultiRangerReadings(front=front, back=back, left=left, right=right, up=up)
 
 
 class TestFindAvoidanceMove:
     def test_front_obstacle_returns_back(self):
-        assert find_avoidance_move(_readings(front=0.05), 0.1) == "back"
+        assert find_avoidance_move(_readings(front=0.05), "forward", 0.1) == "back"
 
     def test_back_obstacle_returns_forward(self):
-        assert find_avoidance_move(_readings(back=0.05), 0.1) == "forward"
+        assert find_avoidance_move(_readings(back=0.05), "back", 0.1) == "forward"
 
     def test_left_obstacle_returns_right(self):
-        assert find_avoidance_move(_readings(left=0.05), 0.1) == "right"
+        assert find_avoidance_move(_readings(left=0.05), "left", 0.1) == "right"
 
     def test_right_obstacle_returns_left(self):
-        assert find_avoidance_move(_readings(right=0.05), 0.1) == "left"
+        assert find_avoidance_move(_readings(right=0.05), "right", 0.1) == "left"
 
     def test_up_obstacle_returns_down(self):
-        assert find_avoidance_move(_readings(up=0.05), 0.1) == "down"
+        assert find_avoidance_move(_readings(up=0.05), "up", 0.1) == "down"
 
     def test_no_obstacle_returns_none(self):
-        assert find_avoidance_move(_readings(), 0.1) is None
+        assert find_avoidance_move(_readings(), "forward", 0.1) is None
 
     def test_reading_above_threshold_returns_none(self):
-        assert find_avoidance_move(_readings(front=0.15), 0.1) is None
+        assert find_avoidance_move(_readings(front=0.15), "forward", 0.1) is None
 
     def test_zero_reading_returns_none(self):
-        assert find_avoidance_move(_readings(front=0.0), 0.1) is None
+        assert find_avoidance_move(_readings(front=0.0), "forward", 0.1) is None
 
     def test_front_takes_priority_over_back(self):
-        assert find_avoidance_move(_readings(front=0.05, back=0.05), 0.1) == "back"
+        assert find_avoidance_move(_readings(front=0.05, back=0.05), "forward", 0.1) == "back"
 
 
 class TestDefaults:
@@ -238,7 +246,9 @@ class TestMinDistance:
         mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
         mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
         mock_ranger.is_obstacle_within.return_value = False
-        mocker.patch("Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger)
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
 
         monitor = CollisionMonitor(mock_scf, event_queue, min_distance_m=0.3)
         monitor._run_once()
@@ -377,3 +387,1026 @@ class TestRun:
         monitor._run()
 
         assert event_queue.qsize() == 1
+
+
+# ---------------------------------------------------------------------------
+# Velocity-dependent threshold — _compute_threshold
+# ---------------------------------------------------------------------------
+
+
+class TestComputeThreshold:
+    def test_zero_velocity_returns_base_detection(self):
+        # 0.0 * 0.30 = 0.0 < 0.25 (base) → returns base 0.25
+        assert CollisionMonitor._compute_threshold(0.0) == pytest.approx(0.25)
+
+    def test_low_velocity_returns_base_detection(self):
+        # 0.1 * 0.60 = 0.06 < 0.25 → returns base 0.25
+        assert CollisionMonitor._compute_threshold(0.1) == pytest.approx(0.25)
+
+    def test_formula_scales_above_crossover(self):
+        # Crossover ≈ 0.38 m/s; at 0.6 m/s: 0.6 * 0.65 = 0.39 > 0.25 → formula kicks in
+        assert CollisionMonitor._compute_threshold(0.6) == pytest.approx(0.39)
+
+    def test_high_velocity_returns_velocity_times_reaction(self):
+        # 2.0 * 0.65 = 1.30 > 0.25 → returns 1.30
+        assert CollisionMonitor._compute_threshold(2.0) == pytest.approx(1.30)
+
+    def test_threshold_grows_with_velocity(self):
+        low = CollisionMonitor._compute_threshold(0.5)
+        high = CollisionMonitor._compute_threshold(2.0)
+
+        assert high > low
+
+
+# ---------------------------------------------------------------------------
+# Dynamic avoidance — distance and velocity scale with FlightState velocity
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicAvoidance:
+    def _make_monitor_with_state(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        velocity: float,
+    ) -> tuple[CollisionMonitor, Any]:
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=0.05, back=None, left=None, right=None, up=None
+        )
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=velocity)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        return monitor, mock_ranger
+
+    def test_avoidance_distance_is_base_at_low_speed(self, mock_scf, event_queue, mocker):
+        # 0.1 m/s * 0.60 = 0.06 < base 0.20 → avoid_distance = 0.20
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=0.1
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        # back() called with base avoidance distance = 0.20
+        mock_mc.back.assert_called_once()
+        distance_arg = mock_mc.back.call_args[0][0]
+        assert distance_arg == pytest.approx(0.20)
+
+    def test_avoidance_distance_scales_at_high_speed(self, mock_scf, event_queue, mocker):
+        # 2.0 m/s * 0.60 = 1.20 > base 0.20 → avoid_distance = 1.20
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=2.0
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_called_once()
+        distance_arg = mock_mc.back.call_args[0][0]
+        assert distance_arg == pytest.approx(1.20)
+
+    def test_avoidance_velocity_is_two_times_flight_speed(self, mock_scf, event_queue, mocker):
+        # flight at 0.5 m/s → avoidance at 1.0 m/s
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=0.5
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_called_once()
+        velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
+        assert velocity_kwarg == pytest.approx(1.0)
+
+    def test_avoidance_velocity_scales_at_higher_speed(self, mock_scf, event_queue, mocker):
+        # flight at 0.8 m/s → avoidance at 1.6 m/s
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=0.8
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
+        assert velocity_kwarg == pytest.approx(1.6)
+
+
+# ---------------------------------------------------------------------------
+# FlightState integration — threshold passed to ranger each poll cycle
+# ---------------------------------------------------------------------------
+
+
+class TestFlightStateDynamicThreshold:
+    def test_uses_get_readings_when_flight_state_provided(self, mock_scf, event_queue, mocker):
+        # When FlightState is provided, per-sensor directional logic is used:
+        # get_readings() is called; is_obstacle_within() is NOT called.
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=None, back=None, left=None, right=None, up=None
+        )
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+
+        state = FlightState(current_velocity_m_s=2.0)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        monitor._run_once()
+
+        mock_ranger.get_readings.assert_called()
+        mock_ranger.is_obstacle_within.assert_not_called()
+
+    def test_ignores_min_distance_m_when_flight_state_provided(
+        self, mock_scf, event_queue, mocker
+    ):
+        # When FlightState is provided, min_distance_m is ignored.
+        # All-None readings → monitor must not trigger regardless of min_distance_m.
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=None, back=None, left=None, right=None, up=None
+        )
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+
+        state = FlightState(current_velocity_m_s=0.1)
+        monitor = CollisionMonitor(mock_scf, event_queue, min_distance_m=0.5, flight_state=state)
+        monitor._run_once()
+
+        # min_distance_m=0.5 is ignored when flight_state is provided
+        assert monitor.is_triggered() is False
+        mock_ranger.is_obstacle_within.assert_not_called()
+
+    def test_uses_static_min_distance_when_no_flight_state(self, mock_scf, event_queue, mocker):
+        # Backward-compat: no FlightState → use min_distance_m=0.3 directly
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=None, back=None, left=None, right=None, up=None
+        )
+        mock_ranger.is_obstacle_within.return_value = False
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+
+        monitor = CollisionMonitor(mock_scf, event_queue, min_distance_m=0.3)
+        monitor._run_once()
+
+        mock_ranger.is_obstacle_within.assert_called_with(pytest.approx(0.3))
+
+
+# ---------------------------------------------------------------------------
+# Directional find_avoidance_move — per-sensor threshold logic
+# ---------------------------------------------------------------------------
+
+
+class TestFindAvoidanceMoveDirectional:
+    """find_avoidance_move: flight-direction sensor vs. side sensors."""
+
+    def test_flight_dir_sensor_uses_dynamic_threshold(self):
+        # Moving forward; front sensor at 0.20 m, dynamic threshold = 0.35
+        # side sensors at 0.15 m but side clearance = 0.10 → 0.15 > 0.10 → no trip
+        readings = _readings(front=0.20, left=0.15)
+        result = find_avoidance_move(readings, "forward", 0.35)
+        assert result == "back"  # front tripped dynamic threshold
+
+    def test_side_sensor_uses_side_clearance_not_dynamic(self):
+        # Moving forward; left sensor at 0.15 m
+        # side clearance = 0.10 → 0.15 > 0.10 → side sensor should NOT trip
+        readings = _readings(left=0.15)
+        result = find_avoidance_move(readings, "forward", 0.35)
+        assert result is None
+
+    def test_side_sensor_trips_when_below_side_clearance(self):
+        # Moving forward; left sensor at 0.05 m
+        # side clearance = 0.10 → 0.05 < 0.10 → side sensor trips
+        readings = _readings(left=0.05)
+        result = find_avoidance_move(readings, "forward", 0.35)
+        assert result == "right"
+
+    def test_none_direction_all_sensors_use_side_clearance(self):
+        # No active direction; left sensor at 0.15 m
+        # 0.15 > 0.10 (side clearance) → no trip
+        readings = _readings(left=0.15)
+        result = find_avoidance_move(readings, None, 0.35)
+        assert result is None
+
+    def test_none_direction_sensor_trips_when_below_side_clearance(self):
+        # No active direction; front sensor at 0.05 m < 0.10 → trips
+        readings = _readings(front=0.05)
+        result = find_avoidance_move(readings, None, 0.35)
+        assert result == "back"
+
+    def test_opposite_sensor_uses_side_clearance(self):
+        # Moving forward; back sensor at 0.15 m
+        # back is NOT the flight-direction sensor → uses _SIDE_CLEARANCE_M = 0.10
+        # 0.15 > 0.10 → no trip
+        readings = _readings(back=0.15)
+        result = find_avoidance_move(readings, "forward", 0.35)
+        assert result is None
+
+    def test_opposite_sensor_trips_when_below_side_clearance(self):
+        # Moving forward; back sensor at 0.05 m < 0.10 → trips
+        readings = _readings(back=0.05)
+        result = find_avoidance_move(readings, "forward", 0.35)
+        assert result == "forward"
+
+    def test_flight_dir_not_tripped_when_above_dynamic_threshold(self):
+        # Moving forward; front sensor at 0.40 m, dynamic threshold = 0.35
+        # 0.40 > 0.35 → front should NOT trip
+        readings = _readings(front=0.40)
+        result = find_avoidance_move(readings, "forward", 0.35)
+        assert result is None
+
+    @pytest.mark.parametrize(
+        "direction,sensor_field,avoidance",
+        [
+            ("forward", "front", "back"),
+            ("back", "back", "forward"),
+            ("left", "left", "right"),
+            ("right", "right", "left"),
+            ("up", "up", "down"),
+        ],
+    )
+    def test_each_flight_direction_maps_to_correct_sensor(
+        self, direction: str, sensor_field: str, avoidance: str
+    ):
+        # Active sensor at 0.20 m, dynamic threshold 0.35 → should trip
+        kwargs = {sensor_field: 0.20}
+        readings = _readings(**kwargs)
+        result = find_avoidance_move(readings, direction, 0.35)
+        assert result == avoidance
+
+    def test_side_clearance_constant_is_point_one(self):
+        assert _SIDE_CLEARANCE_M == pytest.approx(0.10)
+
+
+# ---------------------------------------------------------------------------
+# CollisionMonitor._run_once() uses directional thresholds when FlightState
+# has a direction set
+# ---------------------------------------------------------------------------
+
+
+class TestRunOnceDirectionalThreshold:
+    def _make_monitor_with_direction(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        velocity: float,
+        direction: str | None,
+        readings: MultiRangerReadings,
+    ) -> tuple[CollisionMonitor, Any]:
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = readings
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        return monitor, mock_ranger
+
+    def test_side_sensor_does_not_trigger_when_above_side_clearance(
+        self, mock_scf, event_queue, mocker
+    ):
+        # Moving forward at 0.5 m/s; left sensor at 0.15 m > _SIDE_CLEARANCE_M=0.10
+        # Must NOT trigger
+        readings = MultiRangerReadings(front=None, back=None, left=0.15, right=None, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf, event_queue, mocker, velocity=0.5, direction="forward", readings=readings
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is False
+        assert event_queue.empty()
+
+    def test_side_sensor_triggers_when_below_side_clearance(self, mock_scf, event_queue, mocker):
+        # Moving forward at 0.5 m/s; left sensor at 0.05 m < _SIDE_CLEARANCE_M=0.10
+        # Must trigger
+        readings = MultiRangerReadings(front=None, back=None, left=0.05, right=None, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf, event_queue, mocker, velocity=0.5, direction="forward", readings=readings
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+
+    def test_flight_dir_sensor_uses_dynamic_threshold(self, mock_scf, event_queue, mocker):
+        # Moving forward at 0.6 m/s; dynamic threshold = 0.39 (0.6 * 0.65 > 0.25 base)
+        # front sensor at 0.30 m < 0.39 → must trigger
+        readings = MultiRangerReadings(front=0.30, back=None, left=None, right=None, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf, event_queue, mocker, velocity=0.6, direction="forward", readings=readings
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+
+    def test_flight_dir_sensor_no_trigger_when_above_dynamic_threshold(
+        self, mock_scf, event_queue, mocker
+    ):
+        # Moving forward at 0.6 m/s; dynamic threshold = 0.39 (0.6 * 0.65 > 0.25 base)
+        # front sensor at 0.40 m > 0.39 → must NOT trigger
+        readings = MultiRangerReadings(front=0.40, back=None, left=None, right=None, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf, event_queue, mocker, velocity=0.6, direction="forward", readings=readings
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is False
+
+    def test_none_direction_all_sensors_use_side_clearance(self, mock_scf, event_queue, mocker):
+        # Hovering (direction=None); front at 0.15 m > _SIDE_CLEARANCE_M=0.10 → no trigger
+        readings = MultiRangerReadings(front=0.15, back=None, left=None, right=None, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf, event_queue, mocker, velocity=0.5, direction=None, readings=readings
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is False
+
+    def test_none_direction_triggers_when_below_side_clearance(
+        self, mock_scf, event_queue, mocker
+    ):
+        # Hovering (direction=None); front at 0.05 m < _SIDE_CLEARANCE_M=0.10 → trigger
+        readings = MultiRangerReadings(front=0.05, back=None, left=None, right=None, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf, event_queue, mocker, velocity=0.5, direction=None, readings=readings
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+
+
+# ---------------------------------------------------------------------------
+# _warn_detected — per-sensor 1.5× warning threshold logic
+# ---------------------------------------------------------------------------
+
+
+class TestWarnDetected:
+    """CollisionMonitor._warn_detected uses per-sensor directional thresholds × 1.5."""
+
+    def _make_monitor(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        velocity: float,
+        direction: str | None,
+    ) -> CollisionMonitor:
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        return CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+    def test_hover_sensor_at_0_45m_does_not_warn(self, mock_scf, event_queue):
+        # Mirrors the false-positive seen in flight logs: direction=None,
+        # back=0.45 m. Side clearance warn = 0.10 × 1.5 = 0.15 m.
+        # 0.45 > 0.15 → no warning.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.0, direction=None)
+        readings = _readings(back=0.45)
+        assert monitor._warn_detected(readings) is False
+
+    def test_hover_sensor_at_0_12m_warns(self, mock_scf, event_queue):
+        # direction=None; back=0.12 m. 0.12 < 0.15 → warns.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.0, direction=None)
+        readings = _readings(back=0.12)
+        assert monitor._warn_detected(readings) is True
+
+    def test_flight_dir_sensor_warns_at_1_5x_dynamic_threshold(self, mock_scf, event_queue):
+        # Moving forward at 0.3 m/s; dynamic threshold = 0.25 (base).
+        # warn = 0.25 × 1.5 = 0.375 m. front=0.35 < 0.375 → warns.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.3, direction="forward")
+        readings = _readings(front=0.35)
+        assert monitor._warn_detected(readings) is True
+
+    def test_flight_dir_sensor_no_warn_when_above_1_5x_threshold(self, mock_scf, event_queue):
+        # front=0.40 > 0.375 → no warning.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.3, direction="forward")
+        readings = _readings(front=0.40)
+        assert monitor._warn_detected(readings) is False
+
+    def test_side_sensor_does_not_warn_when_above_side_clearance_warn(self, mock_scf, event_queue):
+        # Moving forward; left=0.45 m. Side warn = 0.10 × 1.5 = 0.15 m.
+        # 0.45 > 0.15 → no warning (was a false-positive with old code).
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.3, direction="forward")
+        readings = _readings(left=0.45)
+        assert monitor._warn_detected(readings) is False
+
+    def test_side_sensor_warns_when_below_side_clearance_warn(self, mock_scf, event_queue):
+        # Moving forward; left=0.12 m < 0.15 → warns.
+        monitor = self._make_monitor(mock_scf, event_queue, velocity=0.3, direction="forward")
+        readings = _readings(left=0.12)
+        assert monitor._warn_detected(readings) is True
+
+
+# ---------------------------------------------------------------------------
+# _diagonal_distance — module-level helper
+# ---------------------------------------------------------------------------
+
+
+class TestDiagonalDistance:
+    def test_returns_hypotenuse_with_sensor_offset_applied(self):
+        # Both readings 0.083 m; offset 0.017 → effective (0.1, 0.1)
+        # hypotenuse = sqrt(0.1² + 0.1²) = sqrt(0.02) ≈ 0.14142
+        result = _diagonal_distance(0.083, 0.083)
+        expected = math.sqrt(2) * (0.083 + _SENSOR_OFFSET_M)
+        assert result == pytest.approx(expected)
+
+    def test_sensor_offset_increases_distance_compared_to_raw_readings(self):
+        # Without offset: sqrt(0.1² + 0.1²) ≈ 0.1414
+        # With offset: sqrt(0.117² + 0.117²) ≈ 0.1655
+        result = _diagonal_distance(0.1, 0.1)
+        raw = math.sqrt(0.1**2 + 0.1**2)
+        assert result is not None
+        assert result > raw
+
+    def test_asymmetric_readings_use_correct_formula(self):
+        a, b = 0.30, 0.20
+        expected = math.sqrt((a + _SENSOR_OFFSET_M) ** 2 + (b + _SENSOR_OFFSET_M) ** 2)
+        assert _diagonal_distance(a, b) == pytest.approx(expected)
+
+    def test_returns_none_when_first_reading_is_none(self):
+        assert _diagonal_distance(None, 0.1) is None
+
+    def test_returns_none_when_second_reading_is_none(self):
+        assert _diagonal_distance(0.1, None) is None
+
+    def test_returns_none_when_both_readings_are_none(self):
+        assert _diagonal_distance(None, None) is None
+
+    def test_returns_none_when_first_reading_is_zero(self):
+        assert _diagonal_distance(0.0, 0.1) is None
+
+    def test_returns_none_when_second_reading_is_zero(self):
+        assert _diagonal_distance(0.1, 0.0) is None
+
+    def test_returns_none_when_first_reading_is_negative(self):
+        assert _diagonal_distance(-0.01, 0.1) is None
+
+    def test_returns_none_when_second_reading_is_negative(self):
+        assert _diagonal_distance(0.1, -0.05) is None
+
+    def test_diagonal_base_constant_is_blade_radius_plus_clearance(self):
+        # 7 cm blade radius + 5 cm tip clearance = 12 cm
+        assert _DIAGONAL_BASE_M == pytest.approx(0.12)
+
+    def test_sensor_offset_constant_is_1_7cm(self):
+        assert _SENSOR_OFFSET_M == pytest.approx(0.017)
+
+
+# ---------------------------------------------------------------------------
+# _diagonal_detected — directional Pythagorean check
+# ---------------------------------------------------------------------------
+
+
+class TestDiagonalDetected:
+    """CollisionMonitor._diagonal_detected uses paired sensor Pythagorean distance."""
+
+    def _make_monitor(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        velocity: float,
+        direction: str | None,
+    ) -> CollisionMonitor:
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        return CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+    def test_returns_true_when_front_right_pair_below_threshold(self, mock_scf, event_queue):
+        # v=0.83 m/s; diagonal threshold = 0.12 + max(0.25, 0.83×0.65) = 0.12+0.54 = 0.66 m
+        # front=0.55 (above direct 0.54 → no direct trigger)
+        # right=0.25 (above side 0.10 → no direct trigger)
+        # diagonal: sqrt(0.567²+0.267²) ≈ 0.627 < 0.66 → diagonal fires
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.55, right=0.25)
+        assert monitor._diagonal_detected(readings) is True
+
+    def test_returns_true_when_front_left_pair_below_threshold(self, mock_scf, event_queue):
+        # Same as above but using front+left pair
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.55, left=0.25)
+        assert monitor._diagonal_detected(readings) is True
+
+    def test_returns_false_when_both_pairs_above_threshold(self, mock_scf, event_queue):
+        # front=0.65, left=0.65, right=0.65
+        # sqrt((0.667)²+(0.667)²) ≈ 0.943 > 0.66 → False
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.65, left=0.65, right=0.65)
+        assert monitor._diagonal_detected(readings) is False
+
+    def test_returns_false_for_up_direction(self, mock_scf, event_queue):
+        # "up" has no diagonal pairs — blades are horizontal
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "up")
+        readings = _readings(front=0.05, back=0.05, left=0.05, right=0.05, up=0.55)
+        assert monitor._diagonal_detected(readings) is False
+
+    def test_returns_false_for_none_direction(self, mock_scf, event_queue):
+        # No active direction — no diagonal check
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, None)
+        readings = _readings(front=0.55, right=0.25)
+        assert monitor._diagonal_detected(readings) is False
+
+    def test_returns_false_when_all_readings_are_none(self, mock_scf, event_queue):
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings()
+        assert monitor._diagonal_detected(readings) is False
+
+    def test_returns_false_when_only_one_sensor_in_pair_has_reading(self, mock_scf, event_queue):
+        # front=0.55 but right=None → _diagonal_distance returns None → no fire
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.55, right=None, left=None)
+        assert monitor._diagonal_detected(readings) is False
+
+    @pytest.mark.parametrize(
+        "direction,leading,adj_field",
+        [
+            ("forward", "front", "right"),
+            ("forward", "front", "left"),
+            ("back", "back", "right"),
+            ("back", "back", "left"),
+            ("left", "left", "front"),
+            ("left", "left", "back"),
+            ("right", "right", "front"),
+            ("right", "right", "back"),
+        ],
+    )
+    def test_each_direction_checks_correct_adjacent_pairs(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        direction: str,
+        leading: str,
+        adj_field: str,
+    ) -> None:
+        # leading=0.55, adjacent=0.25 → diagonal fires at v=0.83
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, direction)
+        kwargs: dict[str, float] = {leading: 0.55, adj_field: 0.25}
+        readings = _readings(**kwargs)
+        assert monitor._diagonal_detected(readings) is True
+
+
+# ---------------------------------------------------------------------------
+# _diagonal_warn_detected — 1.5× diagonal threshold warning
+# ---------------------------------------------------------------------------
+
+
+class TestDiagonalWarnDetected:
+    """CollisionMonitor._diagonal_warn_detected uses 1.5× the diagonal threshold."""
+
+    def _make_monitor(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        velocity: float,
+        direction: str | None,
+    ) -> CollisionMonitor:
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        return CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+    def test_returns_true_when_diagonal_within_1_5x_threshold(self, mock_scf, event_queue):
+        # v=0.83; threshold=0.66 m; warn=0.99 m
+        # front=0.65, right=0.65: sqrt((0.667)²+(0.667)²) ≈ 0.943 < 0.99 → True
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.65, right=0.65)
+        assert monitor._diagonal_warn_detected(readings) is True
+
+    def test_returns_false_when_diagonal_above_1_5x_threshold(self, mock_scf, event_queue):
+        # front=0.70, right=0.70: sqrt((0.717)²+(0.717)²) ≈ 1.014 > 0.99 → False
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.70, right=0.70)
+        assert monitor._diagonal_warn_detected(readings) is False
+
+    def test_returns_false_for_up_direction(self, mock_scf, event_queue):
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "up")
+        readings = _readings(front=0.1, right=0.1)
+        assert monitor._diagonal_warn_detected(readings) is False
+
+    def test_returns_false_for_none_direction(self, mock_scf, event_queue):
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, None)
+        readings = _readings(front=0.65, right=0.65)
+        assert monitor._diagonal_warn_detected(readings) is False
+
+    def test_warn_fires_when_detect_does_not(self, mock_scf, event_queue):
+        # front=0.65, right=0.65: diagonal ≈ 0.943 > threshold(0.66) but < warn(0.99)
+        monitor = self._make_monitor(mock_scf, event_queue, 0.83, "forward")
+        readings = _readings(front=0.65, right=0.65)
+        assert monitor._diagonal_detected(readings) is False
+        assert monitor._diagonal_warn_detected(readings) is True
+
+
+# ---------------------------------------------------------------------------
+# _run_once diagonal integration — triggers when only diagonal fires
+# ---------------------------------------------------------------------------
+
+
+class TestRunOnceDiagonal:
+    """Diagonal check in _run_once fires COLLISION when individual checks do not."""
+
+    def _make_monitor_with_direction(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        velocity: float,
+        direction: str | None,
+        readings: MultiRangerReadings,
+    ) -> tuple[CollisionMonitor, Any]:
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = readings
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        return monitor, mock_ranger
+
+    def test_diagonal_triggers_when_individual_checks_pass(self, mock_scf, event_queue, mocker):
+        # v=0.83; direct leading=0.54 m, side=0.10 m
+        # front=0.55 > 0.54 → no direct. right=0.25 > 0.10 → no direct.
+        # diagonal: sqrt(0.567²+0.267²) ≈ 0.627 < 0.66 → diagonal fires
+        readings = MultiRangerReadings(front=0.55, back=None, left=None, right=0.25, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf,
+            event_queue,
+            mocker,
+            velocity=0.83,
+            direction="forward",
+            readings=readings,
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+        assert event_queue.get_nowait() == "COLLISION"
+
+    def test_diagonal_does_not_trigger_when_both_pairs_clear(self, mock_scf, event_queue, mocker):
+        # front=0.65, left=0.65, right=0.65 — diagonal ≈ 0.943 > 0.66 → no trigger
+        readings = MultiRangerReadings(front=0.65, back=None, left=0.65, right=0.65, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf,
+            event_queue,
+            mocker,
+            velocity=0.83,
+            direction="forward",
+            readings=readings,
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is False
+        assert event_queue.empty()
+
+    def test_diagonal_not_called_without_flight_state(self, mock_scf, event_queue, mocker):
+        # Backward-compat: no FlightState → diagonal path never reached
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.is_obstacle_within.return_value = False
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=0.55, back=None, left=None, right=0.25, up=None
+        )
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+
+        monitor = CollisionMonitor(mock_scf, event_queue)  # no flight_state
+        monitor._run_once()
+
+        assert monitor.is_triggered() is False
+
+    def test_up_direction_skips_diagonal_check(self, mock_scf, event_queue, mocker):
+        # All horizontal sensors close, but direction="up" → no diagonal pairs
+        # Direct check: front=0.05 < _SIDE_CLEARANCE_M=0.10 → that trips the DIRECT side check
+        # Use sensors above side clearance so no direct trigger either
+        readings = MultiRangerReadings(front=0.55, back=0.55, left=0.55, right=0.25, up=0.60)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf,
+            event_queue,
+            mocker,
+            velocity=0.83,
+            direction="up",
+            readings=readings,
+        )
+
+        monitor._run_once()
+
+        # up sensor at 0.60 > direct threshold 0.54 → no direct trigger.
+        # No diagonal pairs for "up" → no diagonal trigger.
+        assert monitor.is_triggered() is False
+
+    def test_warn_detected_includes_diagonal_warn(self, mock_scf, event_queue):
+        # front=0.65, right=0.65: diagonal ≈ 0.943 in warn zone [0.66, 0.99]
+        # _warn_detected should return True via the diagonal warn check
+        state = FlightState(current_velocity_m_s=0.83)
+        state.set_direction("forward")
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        readings = _readings(front=0.65, right=0.65)
+        assert monitor._warn_detected(readings) is True
+
+
+# ---------------------------------------------------------------------------
+# Diagonal fallback avoidance — reverse flight direction when no sensor fired
+# ---------------------------------------------------------------------------
+
+
+class TestDiagonalFallbackAvoidance:
+    """When diagonal fires but find_avoidance_move returns None, _trigger falls back to
+    moving opposite to the flight direction."""
+
+    def _make_monitor(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        velocity: float,
+        direction: str | None,
+        readings: MultiRangerReadings,
+    ) -> tuple[CollisionMonitor, Any]:
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = readings
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=velocity)
+        state.set_direction(direction)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+        return monitor, mock_ranger
+
+    def test_moves_back_when_diagonal_fires_in_forward_direction(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # v=0.83, forward: front=0.55, right=0.25 → diagonal fires, no direct fires
+        # find_avoidance_move returns None → fallback should move "back"
+        readings = MultiRangerReadings(front=0.55, back=None, left=None, right=0.25, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="forward", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "direction,avoidance",
+        [
+            ("forward", "back"),
+            ("back", "forward"),
+            ("left", "right"),
+            ("right", "left"),
+        ],
+    )
+    def test_fallback_direction_for_each_horizontal_direction(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        direction: str,
+        avoidance: str,
+    ) -> None:
+        # All readings are None so find_avoidance_move returns None.
+        # FlightState has a horizontal direction → fallback fires with opposite direction.
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction=direction, readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        getattr(mock_mc, avoidance).assert_called_once()
+
+    def test_fallback_not_applied_when_direct_avoidance_found(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # front=0.05 < side_clearance=0.10 → find_avoidance_move returns "back" directly.
+        # Fallback must NOT double-call back or override the result.
+        readings = MultiRangerReadings(front=0.05, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="forward", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        # back() should be called exactly once (from the direct avoidance, not the fallback)
+        mock_mc.back.assert_called_once()
+
+    def test_fallback_not_applied_without_flight_state(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # Backward-compat: no FlightState → diagonal code never reached,
+        # no avoidance move when readings are all-None.
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = MultiRangerReadings(
+            front=None, back=None, left=None, right=None, up=None
+        )
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        monitor = CollisionMonitor(mock_scf, event_queue)  # no flight_state
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_not_called()
+        mock_mc.forward.assert_not_called()
+        mock_mc.left.assert_not_called()
+        mock_mc.right.assert_not_called()
+
+    def test_fallback_not_applied_for_up_direction(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # "up" is not in _DIAGONAL_PAIRS → fallback must never fire for up direction.
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="up", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_not_called()
+        mock_mc.forward.assert_not_called()
+        mock_mc.left.assert_not_called()
+        mock_mc.right.assert_not_called()
+        mock_mc.down.assert_not_called()
+
+    def test_fallback_not_applied_for_none_direction(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # direction=None (hover) is not in _DIAGONAL_PAIRS → no fallback.
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction=None, readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_mc.back.assert_not_called()
+        mock_mc.forward.assert_not_called()
+        mock_mc.left.assert_not_called()
+        mock_mc.right.assert_not_called()
+        mock_mc.down.assert_not_called()
+
+    def test_fallback_avoidance_distance_scales_with_velocity(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # v=0.83 m/s → avoid_distance = max(0.20, 0.83 × 0.60) = max(0.20, 0.498) = 0.498 m
+        # All-None readings so find_avoidance_move → None → fallback fires
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="forward", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        distance_arg = mock_mc.back.call_args[0][0]
+        assert distance_arg == pytest.approx(0.498)
+
+    def test_fallback_avoidance_velocity_scales_with_flight_speed(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        # v=0.83 m/s → avoid_velocity = 0.83 × 2.0 = 1.66 m/s
+        readings = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger = self._make_monitor(
+            mock_scf, event_queue, mocker, velocity=0.83, direction="forward", readings=readings
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
+        assert velocity_kwarg == pytest.approx(1.66)
+
+
+# ---------------------------------------------------------------------------
+# AdaptivePathCorrector non-interference tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptivePause:
+    """CollisionMonitor pauses normal detection while a correction executes."""
+
+    def _make_monitor_with_adaptive(
+        self,
+        mock_scf: Any,
+        event_queue: queue.Queue[str],
+        mocker: Any,
+        is_correcting: bool,
+        readings: MultiRangerReadings,
+    ):
+        mock_corrector = mocker.MagicMock()
+        mock_corrector.is_correcting.return_value = is_correcting
+
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.get_readings.return_value = readings
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        mocker.patch("Crazyflie.safety.collision_monitor.time.sleep")
+
+        state = FlightState()
+        state.set_direction("forward")
+        state.set_velocity(0.3)
+
+        monitor = CollisionMonitor(
+            mock_scf,
+            event_queue,
+            flight_state=state,
+            adaptive_corrector=mock_corrector,
+        )
+        return monitor, mock_ranger, mock_corrector
+
+    def test_skips_poll_while_adaptive_is_correcting(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        """_trigger is never called when is_correcting() is True and all readings are safe."""
+        close_reading = _SIDE_CLEARANCE_M + 0.05  # in adaptive zone, safe from blades
+        readings = MultiRangerReadings(
+            front=close_reading, back=None, left=None, right=None, up=None
+        )
+        monitor, mock_ranger, mock_corrector = self._make_monitor_with_adaptive(
+            mock_scf, event_queue, mocker, is_correcting=True, readings=readings
+        )
+        trigger_spy = mocker.spy(monitor, "_trigger")
+
+        monitor._run_once()
+
+        trigger_spy.assert_not_called()
+
+    def test_resumes_detection_when_correcting_ends(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        """After is_correcting() returns False, a close sensor fires _trigger."""
+        very_close = 0.05  # below _SIDE_CLEARANCE_M — guaranteed collision
+        readings = MultiRangerReadings(front=very_close, back=None, left=None, right=None, up=None)
+        monitor, mock_ranger, mock_corrector = self._make_monitor_with_adaptive(
+            mock_scf, event_queue, mocker, is_correcting=False, readings=readings
+        )
+        trigger_spy = mocker.spy(monitor, "_trigger")
+
+        monitor._run_once()
+
+        trigger_spy.assert_called_once()
+
+    def test_fires_immediately_when_below_side_clearance_even_during_adaptive(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        """Even with is_correcting()=True, a blade-level reading fires the collision."""
+        below_clearance = _SIDE_CLEARANCE_M * 0.5
+        readings = MultiRangerReadings(
+            front=None, back=None, left=below_clearance, right=None, up=None
+        )
+        monitor, mock_ranger, mock_corrector = self._make_monitor_with_adaptive(
+            mock_scf, event_queue, mocker, is_correcting=True, readings=readings
+        )
+        trigger_spy = mocker.spy(monitor, "_trigger")
+
+        monitor._run_once()
+
+        trigger_spy.assert_called_once()

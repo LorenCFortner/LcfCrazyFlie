@@ -31,11 +31,16 @@ URI = "radio://0/1/250K"
 
 HOUSE_PATH = [
     FlightStep("forward", 1.6, velocity=0.5),
-    FlightStep("left", 1.7, velocity=0.5),
+    FlightStep("turn_left", 90, velocity=90),
+    FlightStep("forward", 1.0, velocity=0.5),
+    FlightStep("turn_right", 95, velocity=95),
     FlightStep("forward", 6.0, velocity=0.5),
-    FlightStep("left", 0.3, velocity=0.5),
+    FlightStep("turn_left", 90, velocity=90),
     FlightStep("forward", 0.3, velocity=0.5),
-    FlightStep("left", 0.3, velocity=0.5),
+    FlightStep("turn_right", 90, velocity=90),
+    FlightStep("forward", 0.3, velocity=0.5),
+    FlightStep("turn_left", 90, velocity=90),
+    FlightStep("forward", 0.3, velocity=0.5),
 ]
 
 

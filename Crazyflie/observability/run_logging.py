@@ -36,7 +36,7 @@ _active_file_handler: logging.Handler | None = None
 def configure_run_logging(
     script_logger_name: str,
     log_file: Path,
-    console_level: int = logging.WARNING,
+    console_level: int = logging.INFO,
     file_level: int = logging.INFO,
 ) -> None:
     """Configure console + file logging for a script's main().

@@ -85,9 +85,9 @@ def _on_collision(
 def main() -> None:
     """Main entry point for the safe flight-around-the-house script.
 
-    Console output stays at WARNING+; a full INFO+ trace of the run —
-    including the retrace/collision-response detail suppressed on the
-    console — is additionally written to _LOG_FILE, overwritten each run.
+    A full INFO+ trace of the run — including retrace/collision-response
+    detail — is written to _LOG_FILE (overwritten each run) as well as the
+    console.
     """
     logging.basicConfig(level=logging.ERROR)
     configure_run_logging(__name__, _LOG_FILE)

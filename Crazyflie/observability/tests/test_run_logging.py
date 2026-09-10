@@ -84,10 +84,10 @@ def test_does_not_call_basic_config(mock_logging, tmp_path):
     mock_logging["basic_config"].assert_not_called()
 
 
-def test_sets_console_handler_to_warning_by_default(mock_logging, tmp_path):
+def test_sets_console_handler_to_info_by_default(mock_logging, tmp_path):
     configure_run_logging("my.script", tmp_path / "logs" / "run.log")
 
-    mock_logging["console_handler"].setLevel.assert_called_once_with(logging.WARNING)
+    mock_logging["console_handler"].setLevel.assert_called_once_with(logging.INFO)
 
 
 def test_console_level_is_overridable(mock_logging, tmp_path):
@@ -109,7 +109,7 @@ def test_creates_file_handler_in_overwrite_mode(mock_logging, tmp_path):
 
     configure_run_logging("my.script", log_file)
 
-    mock_logging["file_handler_cls"].assert_called_once_with(log_file, mode="w")
+    mock_logging["file_handler_cls"].assert_called_once_with(log_file, mode="w", encoding="utf-8")
 
 
 def test_file_handler_set_to_info_by_default(mock_logging, tmp_path):

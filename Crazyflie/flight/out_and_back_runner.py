@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 
 _POST_DISCONNECT_SLEEP_S: float = 5.0  # Allow drone radio to reset before next run.
 
+# CollisionMonitor._trigger() sets is_triggered()=True before its blocking
+# avoidance move finishes and queues "COLLISION" — worst case ~0.3-0.5 s at
+# MAX_SAFE_VELOCITY_M_S. This is how long the post-flight event wait blocks
+# for that event to actually arrive, so it isn't missed by a single check.
+_EVENT_WAIT_TIMEOUT_S: float = 1.5
+
 
 def _never_abort() -> bool:
     """Fallback should_abort passed to on_collision_fn when no monitor is available."""
@@ -69,6 +75,7 @@ def _handle_safety_events(
     on_collision_fn: OnCollisionFn | None = None,
     flight_state: FlightState | None = None,
     adaptive_corrector: AdaptivePathCorrector | None = None,
+    block_timeout_s: float = 0.0,
 ) -> bool:
     """Drain the event queue and react to any safety events.
 
@@ -95,12 +102,21 @@ def _handle_safety_events(
         adaptive_corrector: Shared AdaptivePathCorrector passed through to
             on_collision_fn so a retrace response can keep the same drift
             correction the outbound leg had.
+        block_timeout_s: When > 0, wait up to this many seconds for an event
+            to appear instead of checking once. CollisionMonitor sets
+            is_triggered() True before its blocking avoidance move finishes
+            and queues "COLLISION", so a caller that already knows a
+            monitor triggered should wait rather than check once and miss
+            it. Defaults to 0.0 (non-blocking, original behaviour).
 
     Returns:
         True if an emergency landing was triggered, False if queue was clear.
     """
     try:
-        event = event_queue.get_nowait()
+        if block_timeout_s > 0.0:
+            event = event_queue.get(timeout=block_timeout_s)
+        else:
+            event = event_queue.get_nowait()
     except queue.Empty:
         return False
 
@@ -249,12 +265,17 @@ def run_out_and_back_flight(
                 logger.info(f"Flying {description}...")
                 controller.run_out_and_back(mc, should_abort=should_abort)
 
-                # Drain remaining safety events before landing. The collision
-                # monitor stays attached through this so on_collision_fn can
-                # detect and react to a second collision during its response;
-                # it is detached in the finally block below once this is done.
-                while not event_queue.empty():
-                    if _handle_safety_events(
+                # A monitor may have triggered mid-flight, aborting the path
+                # above. Its event might not be queued yet — CollisionMonitor
+                # sets is_triggered() True before its blocking avoidance move
+                # finishes and calls event_queue.put() — so wait rather than
+                # check once. On normal completion (should_abort() False)
+                # there is nothing to wait for. The collision monitor stays
+                # attached through this so on_collision_fn can detect and
+                # react to a second collision during its response; it is
+                # detached in the finally block below once this is done.
+                if should_abort():
+                    _handle_safety_events(
                         event_queue,
                         mc,
                         scf,
@@ -264,8 +285,8 @@ def run_out_and_back_flight(
                         on_collision_fn=on_collision_fn,
                         flight_state=flight_state,
                         adaptive_corrector=adaptive_corrector,
-                    ):
-                        break
+                        block_timeout_s=_EVENT_WAIT_TIMEOUT_S,
+                    )
 
                 # A second collision inside on_collision_fn's own response
                 # (e.g. during a retrace) re-arms and re-triggers

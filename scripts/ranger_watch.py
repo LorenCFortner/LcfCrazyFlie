@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     """Stream ranger readings continuously until Ctrl+C.
 
-    Console output stays at WARNING+; a full INFO+ trace of every reading is
-    additionally written to _LOG_FILE, overwritten each run. Note this file
-    grows for the entire session (not just one flight) since this script
-    streams continuously until interrupted.
+    A full INFO+ trace of every reading is written to _LOG_FILE (overwritten
+    each run) as well as the console. Note this file grows for the entire
+    session (not just one flight) since this script streams continuously
+    until interrupted.
     """
     logging.basicConfig(level=logging.ERROR)
     configure_run_logging(__name__, _LOG_FILE)

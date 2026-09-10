@@ -1,12 +1,10 @@
 """Console + file logging setup for Crazyflie scripts.
 
 Every script wires up the same handful of lines by hand: suppress cflib's
-own debug noise, show the script's own progress messages, and keep the
-console quiet while a run is in flight. configure_run_logging() does all of
-that plus a second handler that additionally writes a full INFO+ trace to a
-log file — so a run's detail (flight progress, collision response, retrace
-decisions) is always available on disk even when the console stays at
-WARNING+.
+own debug noise, show the script's own progress messages, and write a full
+INFO+ trace to a log file — so a run's detail (flight progress, collision
+response, retrace decisions) is always available on disk. configure_run_logging()
+does all of that in one call.
 
 configure_run_logging() only adjusts handlers/levels — it never calls
 logging.basicConfig() itself, since only a script's own main() should do
@@ -45,11 +43,11 @@ def configure_run_logging(
     it) — console_level is applied to the console handler basicConfig()
     adds, assumed to be the first handler on the root logger.
 
-    Console output is capped at console_level (default WARNING, so routine
-    flight progress stays off the console). A full trace at file_level and
-    above (default INFO) is additionally written to log_file, so both
-    happen on every run: quiet console, detailed file. cflib's own debug
-    noise is always suppressed to CRITICAL regardless of the levels above.
+    Console output is capped at console_level (default INFO). A full trace
+    at file_level and above (default INFO) is additionally written to
+    log_file, so a run's full detail is always on disk even if console_level
+    is raised to quiet the console down. cflib's own debug noise is always
+    suppressed to CRITICAL regardless of the levels above.
 
     log_file's parent directory is created if missing, and the file is
     overwritten (not appended to) on each call, so each run gets a clean
@@ -65,7 +63,7 @@ def configure_run_logging(
             captured in the file alongside the Crazyflie package's.
         log_file: Path to write the full run log to.
         console_level: Minimum level shown on the console. Defaults to
-            logging.WARNING.
+            logging.INFO.
         file_level: Minimum level captured in log_file, and the level set
             on script_logger_name and the "Crazyflie" package logger so
             their messages reach the file. Defaults to logging.INFO.
@@ -80,7 +78,7 @@ def configure_run_logging(
         _active_file_handler.close()
 
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(log_file, mode="w")
+    file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
     file_handler.setLevel(file_level)
     file_handler.setFormatter(logging.Formatter(_FILE_LOG_FORMAT))
     root_logger.addHandler(file_handler)

@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 from cflib.positioning.motion_commander import MotionCommander
 
-_REVERSE_DIRECTION: dict[str, str] = {
+REVERSE_DIRECTION: dict[str, str] = {
     "forward": "back",
     "back": "forward",
     "left": "right",
@@ -147,7 +147,7 @@ class PathRunner:
         for step in reversed(self._steps):
             if should_abort and should_abort():
                 return
-            inverted_command = _REVERSE_DIRECTION.get(step.command, step.command)
+            inverted_command = REVERSE_DIRECTION.get(step.command, step.command)
             self._execute(mc, inverted_command, step.distance_m, step.velocity, step.settle_s)
 
     @staticmethod

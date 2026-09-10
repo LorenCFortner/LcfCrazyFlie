@@ -18,12 +18,23 @@ Pre-flight:
 Post-flight: LED ring off.
 
 Safety events handled: CRASH, BATLOW, COLLISION.
+On COLLISION: retraces whatever has actually been flown so far (see
+Crazyflie.flight.collision_return) rather than assuming a straight line —
+this route has five turns, so a straight fly-back would not work. If a
+second collision interrupts the retrace, the drone backs away from the new
+obstacle for clearance and lands instead of continuing home.
 """
 
 import logging
+from collections.abc import Callable
 
+from cflib.positioning.motion_commander import MotionCommander
+
+from Crazyflie.flight.collision_return import CollisionContext, fly_home_after_collision
 from Crazyflie.flight.out_and_back_runner import run_out_and_back_flight
 from Crazyflie.flight.path_runner import FlightStep
+from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
+from Crazyflie.state.flight_state import FlightState
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +55,30 @@ HOUSE_PATH = [
 ]
 
 
+def _on_collision(
+    mc: MotionCommander,
+    context: CollisionContext,
+    should_abort: Callable[[], bool],
+    flight_state: FlightState,
+    adaptive_corrector: AdaptivePathCorrector | None,
+) -> None:
+    """Retrace the flown path home; back away and stop on a second collision.
+
+    Args:
+        mc: Active MotionCommander instance.
+        context: Flight progress snapshot from the collision.
+        should_abort: Re-armed CollisionMonitor.is_triggered — detects a
+            second collision during the retrace.
+        flight_state: Shared FlightState so the retrace keeps the collision
+            monitor's directional detection threshold accurate.
+        adaptive_corrector: Shared AdaptivePathCorrector so the retrace keeps
+            the same mid-step drift correction the outbound leg had.
+    """
+    fly_home_after_collision(
+        mc, context, should_abort, flight_state=flight_state, adaptive_corrector=adaptive_corrector
+    )
+
+
 def main() -> None:
     """Main entry point for the safe flight-around-the-house script."""
     logging.basicConfig(level=logging.ERROR)
@@ -51,7 +86,12 @@ def main() -> None:
     logging.getLogger(__name__).setLevel(logging.INFO)
     logging.getLogger("Crazyflie").setLevel(logging.WARNING)
 
-    run_out_and_back_flight(HOUSE_PATH, uri=URI, description="fly house route and retrace home")
+    run_out_and_back_flight(
+        HOUSE_PATH,
+        uri=URI,
+        description="fly house route and retrace home",
+        on_collision_fn=_on_collision,
+    )
 
 
 if __name__ == "__main__":

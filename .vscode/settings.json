@@ -1,14 +1,15 @@
 {
-    "cSpell.words": [
-        "cflib",
-        "crazyflie",
-        "mypy",
-        "pytest",
-        "bitcraze",
-        "crtp",
-        "multiranger",
-        "syncCrazyflie",
-        "ruff",
-        "uv"
-    ]
+	"cSpell.words": [
+		"BATLOW",
+		"bitcraze",
+		"cflib",
+		"crazyflie",
+		"crtp",
+		"multiranger",
+		"mypy",
+		"pytest",
+		"ruff",
+		"syncCrazyflie",
+		"uv"
+	]
 }

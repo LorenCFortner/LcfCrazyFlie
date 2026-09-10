@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from Crazyflie.flight.collision_return import CollisionContext
 from Crazyflie.flight.out_and_back_runner import _handle_safety_events
 
 # ---------------------------------------------------------------------------
@@ -81,38 +82,174 @@ def test_handle_safety_events_calls_mc_land_on_collision_when_no_collision_fn(
     mc.land.assert_called_once()
 
 
-def test_handle_safety_events_calls_custom_collision_fn_with_distance_on_collision(
+def test_handle_safety_events_calls_custom_collision_fn_with_context_on_collision(
     mocker, mc, scf, stabilizer_monitor
 ):
     custom_fn = mocker.MagicMock()
+    controller = mocker.MagicMock()
+    controller.flight_log = [mocker.MagicMock()]
     eq: queue.Queue[str] = queue.Queue()
     eq.put("COLLISION")
 
     result = _handle_safety_events(
-        eq, mc, scf, stabilizer_monitor, on_collision_fn=custom_fn, distance_traveled_m=1.5
+        eq, mc, scf, stabilizer_monitor, controller=controller, on_collision_fn=custom_fn
     )
 
     assert result is True
-    custom_fn.assert_called_once_with(mc, 1.5)
+    custom_fn.assert_called_once()
     mc.land.assert_not_called()
 
 
-def test_handle_safety_events_custom_collision_fn_receives_correct_distance(
+def test_handle_safety_events_custom_collision_fn_receives_flight_log_in_context(
     mocker, mc, scf, stabilizer_monitor
 ):
-    received: list[float] = []
+    received: list[CollisionContext] = []
 
-    def capture_fn(mc_arg, dist: float) -> None:
-        received.append(dist)
+    def capture_fn(mc_arg, context, should_abort, flight_state, adaptive_corrector) -> None:
+        received.append(context)
 
+    controller = mocker.MagicMock()
+    fake_log = [mocker.MagicMock(), mocker.MagicMock()]
+    controller.flight_log = fake_log
     eq: queue.Queue[str] = queue.Queue()
     eq.put("COLLISION")
 
     _handle_safety_events(
-        eq, mc, scf, stabilizer_monitor, on_collision_fn=capture_fn, distance_traveled_m=2.75
+        eq, mc, scf, stabilizer_monitor, controller=controller, on_collision_fn=capture_fn
     )
 
-    assert received == [pytest.approx(2.75)]
+    assert len(received) == 1
+    assert received[0].flight_log == fake_log
+
+
+def test_handle_safety_events_collision_fn_receives_empty_log_without_controller(
+    mocker, mc, scf, stabilizer_monitor
+):
+    received: list[CollisionContext] = []
+
+    def capture_fn(mc_arg, context, should_abort, flight_state, adaptive_corrector) -> None:
+        received.append(context)
+
+    eq: queue.Queue[str] = queue.Queue()
+    eq.put("COLLISION")
+
+    _handle_safety_events(eq, mc, scf, stabilizer_monitor, on_collision_fn=capture_fn)
+
+    assert received[0].flight_log == []
+
+
+def test_handle_safety_events_resets_collision_monitor_before_calling_collision_fn(
+    mocker, mc, scf, stabilizer_monitor
+):
+    collision_monitor = mocker.MagicMock()
+    controller = mocker.MagicMock()
+    controller.flight_log = []
+    custom_fn = mocker.MagicMock()
+    eq: queue.Queue[str] = queue.Queue()
+    eq.put("COLLISION")
+
+    _handle_safety_events(
+        eq,
+        mc,
+        scf,
+        stabilizer_monitor,
+        controller=controller,
+        collision_monitor=collision_monitor,
+        on_collision_fn=custom_fn,
+    )
+
+    collision_monitor.reset.assert_called_once()
+
+
+def test_handle_safety_events_passes_collision_monitor_is_triggered_as_should_abort(
+    mocker, mc, scf, stabilizer_monitor
+):
+    collision_monitor = mocker.MagicMock()
+    controller = mocker.MagicMock()
+    controller.flight_log = []
+    custom_fn = mocker.MagicMock()
+    eq: queue.Queue[str] = queue.Queue()
+    eq.put("COLLISION")
+
+    _handle_safety_events(
+        eq,
+        mc,
+        scf,
+        stabilizer_monitor,
+        controller=controller,
+        collision_monitor=collision_monitor,
+        on_collision_fn=custom_fn,
+    )
+
+    _, args, _ = custom_fn.mock_calls[0]
+    should_abort_arg = args[2]
+    assert should_abort_arg is collision_monitor.is_triggered
+
+
+def test_handle_safety_events_should_abort_is_false_without_collision_monitor(
+    mocker, mc, scf, stabilizer_monitor
+):
+    controller = mocker.MagicMock()
+    controller.flight_log = []
+    custom_fn = mocker.MagicMock()
+    eq: queue.Queue[str] = queue.Queue()
+    eq.put("COLLISION")
+
+    _handle_safety_events(
+        eq, mc, scf, stabilizer_monitor, controller=controller, on_collision_fn=custom_fn
+    )
+
+    _, args, _ = custom_fn.mock_calls[0]
+    should_abort_arg = args[2]
+    assert should_abort_arg() is False
+
+
+def test_handle_safety_events_passes_flight_state_to_collision_fn(
+    mocker, mc, scf, stabilizer_monitor
+):
+    flight_state = mocker.MagicMock()
+    controller = mocker.MagicMock()
+    controller.flight_log = []
+    custom_fn = mocker.MagicMock()
+    eq: queue.Queue[str] = queue.Queue()
+    eq.put("COLLISION")
+
+    _handle_safety_events(
+        eq,
+        mc,
+        scf,
+        stabilizer_monitor,
+        controller=controller,
+        on_collision_fn=custom_fn,
+        flight_state=flight_state,
+    )
+
+    _, args, _ = custom_fn.mock_calls[0]
+    assert args[3] is flight_state
+
+
+def test_handle_safety_events_passes_adaptive_corrector_to_collision_fn(
+    mocker, mc, scf, stabilizer_monitor
+):
+    adaptive_corrector = mocker.MagicMock()
+    controller = mocker.MagicMock()
+    controller.flight_log = []
+    custom_fn = mocker.MagicMock()
+    eq: queue.Queue[str] = queue.Queue()
+    eq.put("COLLISION")
+
+    _handle_safety_events(
+        eq,
+        mc,
+        scf,
+        stabilizer_monitor,
+        controller=controller,
+        on_collision_fn=custom_fn,
+        adaptive_corrector=adaptive_corrector,
+    )
+
+    _, args, _ = custom_fn.mock_calls[0]
+    assert args[4] is adaptive_corrector
 
 
 def test_handle_safety_events_calls_land_immediately_on_unknown_event(

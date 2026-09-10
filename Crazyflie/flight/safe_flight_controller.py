@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING
 
 from cflib.positioning.motion_commander import MotionCommander
 
-from Crazyflie.flight.path_runner import FlightStep
+from Crazyflie.flight.path_runner import REVERSE_DIRECTION, FlightStep
 from Crazyflie.safety.collision_monitor import MAX_SAFE_VELOCITY_M_S
 from Crazyflie.state.flight_state import FlightState
 
@@ -49,17 +49,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _POLL_S: float = 0.10  # 10 Hz abort polling — matches Multi-ranger sensor refresh rate
-
-_REVERSE_DIRECTION: dict[str, str] = {
-    "forward": "back",
-    "back": "forward",
-    "left": "right",
-    "right": "left",
-    "up": "down",
-    "down": "up",
-    "turn_left": "turn_right",
-    "turn_right": "turn_left",
-}
 
 # After a 180° pivot the drone's heading is reversed, so forward/back and
 # up/down already map correctly. Only lateral and rotational commands need
@@ -127,6 +116,8 @@ class SafeFlightController:
         self._state = flight_state
         self._adaptive_corrector = adaptive_corrector
         self._distance_traveled_m: float = 0.0
+        self._flight_log: list[FlightStep] = []
+        self._last_partial_magnitude: float = 0.0
 
     @property
     def distance_traveled_m(self) -> float:
@@ -137,6 +128,47 @@ class SafeFlightController:
         from elapsed poll time × velocity). Turn steps contribute 0 m.
         """
         return self._distance_traveled_m
+
+    @property
+    def flight_log(self) -> list[FlightStep]:
+        """Steps actually flown so far, in execution order.
+
+        Completed steps are logged in full (their planned command and
+        distance_m). A step interrupted by should_abort is logged with the
+        partial magnitude actually covered instead of the planned distance_m
+        — metres for linear moves, degrees for turns — and is omitted
+        entirely if the abort fired before any movement occurred.
+
+        Reversing this list and inverting each command (see
+        Crazyflie.flight.path_runner.REVERSE_DIRECTION) yields the path back
+        to the start point, regardless of which leg of a multi-leg flight
+        (outbound, pivot, or return) was interrupted.
+        """
+        return list(self._flight_log)
+
+    def _record_step(self, executed_step: FlightStep, aborted: bool) -> None:
+        """Append the step actually flown to the flight log.
+
+        Args:
+            executed_step: The step as actually commanded (command already
+                resolved — e.g. inverted for a return leg), with the full
+                planned distance_m/velocity/settle_s.
+            aborted: Whether should_abort fired mid-move. When True, only
+                self._last_partial_magnitude (set by the preceding _execute
+                call) is logged in place of the planned distance_m.
+        """
+        if aborted:
+            if self._last_partial_magnitude > 0.0:
+                self._flight_log.append(
+                    FlightStep(
+                        executed_step.command,
+                        self._last_partial_magnitude,
+                        executed_step.velocity,
+                        0.0,
+                    )
+                )
+        else:
+            self._flight_log.append(executed_step)
 
     def run(
         self,
@@ -164,6 +196,7 @@ class SafeFlightController:
                 should_abort,
                 self._adaptive_corrector,
             )
+            self._record_step(step, aborted)
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -203,6 +236,7 @@ class SafeFlightController:
                 should_abort,
                 self._adaptive_corrector,
             )
+            self._record_step(step, aborted)
             if aborted:
                 return
             if step.settle_s > 0.0:
@@ -222,6 +256,9 @@ class SafeFlightController:
             should_abort,
             self._adaptive_corrector,
         )
+        self._record_step(
+            FlightStep("turn_right", _PIVOT_DEGREES, _PIVOT_RATE_DEG_PER_S, 0.0), aborted
+        )
         if aborted:
             return
 
@@ -237,6 +274,9 @@ class SafeFlightController:
                 step.velocity,
                 should_abort,
                 self._adaptive_corrector,
+            )
+            self._record_step(
+                FlightStep(inverted, step.distance_m, step.velocity, step.settle_s), aborted
             )
             if aborted:
                 return
@@ -263,7 +303,7 @@ class SafeFlightController:
         for step in reversed(self._steps):
             if should_abort and should_abort():
                 return
-            inverted = _REVERSE_DIRECTION.get(step.command, step.command)
+            inverted = REVERSE_DIRECTION.get(step.command, step.command)
             aborted = self._execute(
                 mc,
                 inverted,
@@ -271,6 +311,9 @@ class SafeFlightController:
                 step.velocity,
                 should_abort,
                 self._adaptive_corrector,
+            )
+            self._record_step(
+                FlightStep(inverted, step.distance_m, step.velocity, step.settle_s), aborted
             )
             if aborted:
                 return
@@ -348,6 +391,7 @@ class SafeFlightController:
         while elapsed < duration_s:
             if should_abort and should_abort():
                 mc.stop()
+                self._last_partial_magnitude = velocity * elapsed
                 if not is_turn:
                     self._distance_traveled_m += velocity * elapsed
                 return True
@@ -373,6 +417,7 @@ class SafeFlightController:
             elapsed += _POLL_S
 
         mc.stop()
+        self._last_partial_magnitude = 0.0
         if not is_turn:
             self._distance_traveled_m += distance_m
         return False

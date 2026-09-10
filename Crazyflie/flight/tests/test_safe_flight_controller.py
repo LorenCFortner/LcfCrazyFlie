@@ -702,6 +702,131 @@ class TestDistanceTraveled:
 
 
 # ---------------------------------------------------------------------------
+# flight_log — records steps actually flown, for collision retrace
+# ---------------------------------------------------------------------------
+
+
+class TestFlightLog:
+    def test_flight_log_starts_empty(self):
+        controller = SafeFlightController([FlightStep("forward", 1.0)])
+        assert controller.flight_log == []
+
+    def test_completed_step_logged_in_full(self, mock_mc):
+        controller = SafeFlightController([FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0)])
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        assert controller.flight_log == [FlightStep("forward", 1.0, 0.5, 0.0)]
+
+    def test_multiple_completed_steps_logged_in_order(self, mock_mc):
+        controller = SafeFlightController(
+            [
+                FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0),
+                FlightStep("turn_left", 90.0, velocity=45.0, settle_s=0.0),
+                FlightStep("left", 0.5, velocity=0.3, settle_s=0.0),
+            ]
+        )
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        assert controller.flight_log == [
+            FlightStep("forward", 1.0, 0.5, 0.0),
+            FlightStep("turn_left", 90.0, 45.0, 0.0),
+            FlightStep("left", 0.5, 0.3, 0.0),
+        ]
+
+    def test_aborted_step_logs_partial_magnitude(self, mock_mc):
+        target_cycles = 3
+        sleep_count = [0]
+
+        def counting_sleep(duration: float) -> None:
+            sleep_count[0] += 1
+
+        def abort_after_target_sleeps() -> bool:
+            return sleep_count[0] >= target_cycles
+
+        velocity = 0.5
+        controller = SafeFlightController(
+            [FlightStep("forward", 10.0, velocity=velocity, settle_s=0.0)]
+        )
+        with patch(
+            "Crazyflie.flight.safe_flight_controller.time.sleep",
+            side_effect=counting_sleep,
+        ):
+            controller.run(mock_mc, should_abort=abort_after_target_sleeps)
+
+        expected_magnitude = velocity * target_cycles * _POLL_S
+        assert len(controller.flight_log) == 1
+        logged_step = controller.flight_log[0]
+        assert logged_step.command == "forward"
+        assert logged_step.distance_m == pytest.approx(expected_magnitude)
+        assert logged_step.velocity == pytest.approx(velocity)
+        assert logged_step.settle_s == pytest.approx(0.0)
+
+    def test_abort_before_movement_starts_logs_nothing_for_that_step(self, mock_mc):
+        controller = SafeFlightController([FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0)])
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=always_abort)
+
+        assert controller.flight_log == []
+
+    def test_flight_log_includes_completed_steps_before_the_aborted_one(self, mock_mc):
+        # First step completes in exactly one poll cycle (distance == velocity * _POLL_S),
+        # so call #1 (pre-step check) and call #2 (its one poll-loop check) must both
+        # return False; call #3 (pre-step check for "left") returns True.
+        call_count = [0]
+
+        def abort_after_two_calls():
+            call_count[0] += 1
+            return call_count[0] > 2
+
+        controller = SafeFlightController(
+            [
+                FlightStep("forward", 0.5 * _POLL_S, velocity=0.5, settle_s=0.0),
+                FlightStep("left", 2.0, velocity=0.5, settle_s=0.0),
+            ]
+        )
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=abort_after_two_calls)
+
+        assert controller.flight_log == [FlightStep("forward", 0.5 * _POLL_S, 0.5, 0.0)]
+        mock_mc.start_left.assert_not_called()
+
+    def test_flight_log_records_turn_step_in_degrees(self, mock_mc):
+        controller = SafeFlightController(
+            [FlightStep("turn_right", 90.0, velocity=45.0, settle_s=0.0)]
+        )
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        assert controller.flight_log == [FlightStep("turn_right", 90.0, 45.0, 0.0)]
+
+    def test_run_out_and_back_records_pivot_and_inverted_return_steps(self, mock_mc):
+        controller = SafeFlightController([FlightStep("left", 1.0, velocity=0.5, settle_s=0.0)])
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run_out_and_back(mock_mc, should_abort=never_abort)
+
+        commands = [step.command for step in controller.flight_log]
+        assert commands == ["left", "turn_right", "right"]
+
+    def test_run_reversed_records_inverted_steps(self, mock_mc):
+        controller = SafeFlightController([FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0)])
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run_reversed(mock_mc, should_abort=never_abort)
+
+        assert controller.flight_log == [FlightStep("back", 1.0, 0.5, 0.0)]
+
+    def test_flight_log_returns_a_copy(self, mock_mc):
+        controller = SafeFlightController([FlightStep("forward", 1.0, velocity=0.5, settle_s=0.0)])
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        log = controller.flight_log
+        log.append(FlightStep("up", 1.0))
+        assert len(controller.flight_log) == 1
+
+
+# ---------------------------------------------------------------------------
 # Adaptive correction tests
 # ---------------------------------------------------------------------------
 

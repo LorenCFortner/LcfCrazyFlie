@@ -18,6 +18,7 @@ from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.decks.led_ring import LedRingDeck
+from Crazyflie.flight.collision_return import CollisionContext, OnCollisionFn
 from Crazyflie.flight.path_runner import FlightStep
 from Crazyflie.flight.safe_flight_controller import SafeFlightController
 from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
@@ -31,6 +32,11 @@ from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 logger = logging.getLogger(__name__)
 
 _POST_DISCONNECT_SLEEP_S: float = 5.0  # Allow drone radio to reset before next run.
+
+
+def _never_abort() -> bool:
+    """Fallback should_abort passed to on_collision_fn when no monitor is available."""
+    return False
 
 
 def _default_pre_flight(scf: SyncCrazyflie) -> None:
@@ -58,8 +64,11 @@ def _handle_safety_events(
     mc: MotionCommander,
     scf: SyncCrazyflie,
     stabilizer_monitor: StabilizerMonitor,
-    on_collision_fn: Callable[[MotionCommander, float], None] | None = None,
-    distance_traveled_m: float = 0.0,
+    controller: SafeFlightController | None = None,
+    collision_monitor: CollisionMonitor | None = None,
+    on_collision_fn: OnCollisionFn | None = None,
+    flight_state: FlightState | None = None,
+    adaptive_corrector: AdaptivePathCorrector | None = None,
 ) -> bool:
     """Drain the event queue and react to any safety events.
 
@@ -68,11 +77,24 @@ def _handle_safety_events(
         mc: Active MotionCommander instance.
         scf: Connected SyncCrazyflie instance.
         stabilizer_monitor: Running StabilizerMonitor (stopped on event).
+        controller: SafeFlightController whose flight_log describes progress
+            so far. Required (alongside on_collision_fn) to build a
+            CollisionContext on a COLLISION event; the context carries an
+            empty flight_log when omitted.
+        collision_monitor: CollisionMonitor to re-arm (reset()) before
+            invoking on_collision_fn, so a second collision during the
+            response is detectable via its is_triggered method. Without it,
+            on_collision_fn receives an always-False should_abort.
         on_collision_fn: Optional callable invoked on COLLISION instead of
-            mc.land(). Receives the MotionCommander and the distance flown
-            before the collision in metres.
-        distance_traveled_m: Linear distance flown before the abort, passed
-            to on_collision_fn when provided.
+            mc.land(). Receives the MotionCommander, a CollisionContext, a
+            should_abort callable, the shared FlightState, and the shared
+            AdaptivePathCorrector.
+        flight_state: Shared FlightState passed through to on_collision_fn
+            so any further movement keeps CollisionMonitor's directional
+            threshold accurate.
+        adaptive_corrector: Shared AdaptivePathCorrector passed through to
+            on_collision_fn so a retrace response can keep the same drift
+            correction the outbound leg had.
 
     Returns:
         True if an emergency landing was triggered, False if queue was clear.
@@ -93,11 +115,20 @@ def _handle_safety_events(
         land_on_low_battery(mc)
     elif event == "COLLISION":
         if on_collision_fn is not None:
+            flight_log = controller.flight_log if controller is not None else []
+            context = CollisionContext(flight_log=flight_log)
+            if collision_monitor is not None:
+                collision_monitor.reset()
+                should_abort = collision_monitor.is_triggered
+            else:
+                should_abort = _never_abort
             logger.warning(
                 f"Obstacle detected — avoidance complete, executing collision response"
-                f" ({distance_traveled_m:.2f} m traveled)."
+                f" ({len(context.flight_log)} logged step(s))."
             )
-            on_collision_fn(mc, distance_traveled_m)
+            on_collision_fn(
+                mc, context, should_abort, flight_state or FlightState(), adaptive_corrector
+            )
         else:
             logger.warning("Obstacle detected — avoidance complete, landing now.")
             mc.land()
@@ -114,7 +145,7 @@ def run_out_and_back_flight(
     description: str,
     pre_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
     post_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
-    on_collision_fn: Callable[[MotionCommander, float], None] | None = None,
+    on_collision_fn: OnCollisionFn | None = None,
 ) -> None:
     """Execute a path out-and-back flight with full safety architecture.
 
@@ -135,8 +166,10 @@ def run_out_and_back_flight(
         post_flight_fn: Called after landing to clean up (e.g. LED off).
             Defaults to turning off the LED ring when None.
         on_collision_fn: Called on a COLLISION event instead of mc.land().
-            Receives the MotionCommander and the linear distance flown before
-            the collision in metres. Defaults to mc.land() when None.
+            Receives the MotionCommander, a CollisionContext describing
+            flight progress, a should_abort callable for detecting a second
+            collision during the response, the shared FlightState, and the
+            shared AdaptivePathCorrector. Defaults to mc.land() when None.
     """
     _pre = pre_flight_fn if pre_flight_fn is not None else _default_pre_flight
     _post = post_flight_fn if post_flight_fn is not None else _default_post_flight
@@ -215,19 +248,33 @@ def run_out_and_back_flight(
 
                 logger.info(f"Flying {description}...")
                 controller.run_out_and_back(mc, should_abort=should_abort)
-                collision_monitor.detach_motion_commander()
 
-                # Drain remaining safety events before landing.
+                # Drain remaining safety events before landing. The collision
+                # monitor stays attached through this so on_collision_fn can
+                # detect and react to a second collision during its response;
+                # it is detached in the finally block below once this is done.
                 while not event_queue.empty():
                     if _handle_safety_events(
                         event_queue,
                         mc,
                         scf,
                         stabilizer_monitor,
+                        controller=controller,
+                        collision_monitor=collision_monitor,
                         on_collision_fn=on_collision_fn,
-                        distance_traveled_m=controller.distance_traveled_m,
+                        flight_state=flight_state,
+                        adaptive_corrector=adaptive_corrector,
                     ):
                         break
+
+                # A second collision inside on_collision_fn's own response
+                # (e.g. during a retrace) re-arms and re-triggers
+                # collision_monitor, which queues its own "COLLISION" event.
+                # That event is already fully handled synchronously by
+                # on_collision_fn's should_abort check — discard it here so
+                # it cannot linger and be misread by a future drain.
+                while not event_queue.empty():
+                    event_queue.get_nowait()
 
                 logger.info("Route complete — landing.")
 

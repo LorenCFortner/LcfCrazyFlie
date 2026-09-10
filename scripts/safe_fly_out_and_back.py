@@ -19,11 +19,15 @@ the obstacle was detected.
 """
 
 import logging
+from collections.abc import Callable
 
 from cflib.positioning.motion_commander import MotionCommander
 
+from Crazyflie.flight.collision_return import CollisionContext
 from Crazyflie.flight.out_and_back_runner import run_out_and_back_flight
 from Crazyflie.flight.path_runner import FlightStep
+from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
+from Crazyflie.state.flight_state import FlightState
 
 logger = logging.getLogger(__name__)
 
@@ -36,16 +40,38 @@ OUT_AND_BACK_PATH = [
 ]
 
 
-def _on_collision(mc: MotionCommander, distance_m: float) -> None:
+def _on_collision(
+    mc: MotionCommander,
+    context: CollisionContext,
+    should_abort: Callable[[], bool],
+    flight_state: FlightState,
+    adaptive_corrector: AdaptivePathCorrector | None,
+) -> None:
     """Back up, turn 180°, then fly home the remaining distance.
 
+    Preserves this script's original unmonitored behaviour: should_abort,
+    flight_state, and adaptive_corrector are unused, and the return leg is a
+    direct fly-back rather than a turn-by-turn retrace. That is safe here
+    because OUT_AND_BACK_PATH is a single straight leg, so the flown linear
+    distance is unambiguous — but only forward/back entries are summed.
+    run_out_and_back always flies a 180° pivot between the outbound and
+    return legs, and a collision during the return leg means flight_log also
+    contains that pivot's turn_right entry, whose distance_m is in
+    *degrees*, not metres; including it would corrupt the total.
+
     Backs up _COLLISION_BACKUP_M for clearance before turning, then flies
-    forward distance_m - _COLLISION_BACKUP_M to return to the start point.
+    forward the outstanding distance to return to the start point.
 
     Args:
         mc: Active MotionCommander instance.
-        distance_m: Linear distance flown before the collision was detected.
+        context: Flight progress snapshot from the collision.
+        should_abort: Unused — this script's return leg is unmonitored.
+        flight_state: Unused — this script's return leg is unmonitored.
+        adaptive_corrector: Unused — this script's return leg is unmonitored.
     """
+    distance_m = sum(
+        step.distance_m for step in context.flight_log if step.command in ("forward", "back")
+    )
     return_m = max(0.0, distance_m - _COLLISION_BACKUP_M)
     logger.info(
         f"Collision return: backing up {_COLLISION_BACKUP_M:.2f} m,"

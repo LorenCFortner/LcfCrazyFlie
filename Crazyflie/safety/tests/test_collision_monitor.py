@@ -1410,3 +1410,138 @@ class TestAdaptivePause:
         monitor._run_once()
 
         trigger_spy.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# FlightRecorder integration — every poll cycle recorded, fresh-read fix
+# ---------------------------------------------------------------------------
+
+
+class TestFlightRecorderIntegration:
+    """CollisionMonitor records every ranger reading when a recorder is
+    attached, and _trigger() computes its avoidance move from a *fresh*
+    reading taken after mc.stop() — not the reading that caused the trigger.
+    """
+
+    def test_run_once_records_reading_when_recorder_attached(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        mock_recorder = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        readings = _readings(front=1.0)
+        mock_ranger.get_readings.return_value = readings
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=0.5)
+        state.set_direction("forward")
+        monitor = CollisionMonitor(
+            mock_scf, event_queue, flight_state=state, recorder=mock_recorder
+        )
+
+        monitor._run_once()
+
+        mock_recorder.record_ranger.assert_called_once_with(readings, "forward", 0.5, "poll")
+
+    def test_run_once_does_not_record_when_no_recorder(self, monitor_with_ranger: Any) -> None:
+        monitor, mock_ranger, _ = monitor_with_ranger
+        mock_ranger.get_readings.return_value = _readings()
+
+        monitor._run_once()  # should not raise without a recorder
+
+    def test_trigger_records_trigger_and_post_stop_readings(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        mock_recorder = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        pre_stop_readings = _readings(front=0.28)
+        post_stop_readings = _readings(front=0.60)
+        mock_ranger.get_readings.side_effect = [pre_stop_readings, post_stop_readings]
+        mock_mc = mocker.MagicMock()
+
+        state = FlightState(current_velocity_m_s=0.5)
+        state.set_direction("forward")
+        monitor = CollisionMonitor(
+            mock_scf, event_queue, flight_state=state, recorder=mock_recorder
+        )
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_recorder.record_ranger.assert_any_call(pre_stop_readings, "forward", 0.5, "trigger")
+        mock_recorder.record_ranger.assert_any_call(
+            post_stop_readings, "forward", 0.5, "post_stop"
+        )
+
+    def test_trigger_reads_ranger_twice_when_mc_attached(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings()
+        mock_mc = mocker.MagicMock()
+        monitor = CollisionMonitor(mock_scf, event_queue)
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        assert mock_ranger.get_readings.call_count == 2
+
+    def test_trigger_avoidance_move_uses_fresh_post_stop_reading(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        """Regression test for the momentum bug: the pre-stop reading shows
+        no obstacle on the left (would not trigger a left-avoidance), but
+        the fresh post-stop reading does — the avoidance move must be based
+        on the post-stop reading, proving _trigger() re-reads rather than
+        reusing the stale pre-stop snapshot.
+        """
+        mock_ranger = mocker.MagicMock()
+        pre_stop_readings = _readings(front=0.28)  # triggers on front; left clear
+        post_stop_readings = _readings(left=0.05)  # front now clear; left now close
+        mock_ranger.get_readings.side_effect = [pre_stop_readings, post_stop_readings]
+        mock_mc = mocker.MagicMock()
+        monitor = CollisionMonitor(mock_scf, event_queue, min_distance_m=0.325)
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        # Avoidance direction computed from post_stop_readings (left close) is
+        # "right" — not "back", which the stale pre_stop_readings would give.
+        mock_mc.right.assert_called_once()
+        mock_mc.back.assert_not_called()
+
+    def test_trigger_does_not_record_when_no_recorder(
+        self, monitor_with_ranger: Any, mocker: Any
+    ) -> None:
+        monitor, mock_ranger, _ = monitor_with_ranger
+        mock_ranger.get_readings.return_value = _readings()
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)  # should not raise without a recorder
+
+    def test_telemetry_recorded_only_after_stop_and_avoidance_move(
+        self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
+    ) -> None:
+        """Regression test: a telemetry disk write must never sit between
+        mc.stop() and the avoidance move — both are time-critical and must
+        fire back-to-back with no recording call in between.
+        """
+        mock_recorder = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=0.05)
+        mock_mc = mocker.MagicMock()
+
+        call_order: list[str] = []
+        mock_mc.stop.side_effect = lambda: call_order.append("stop")
+        mock_mc.back.side_effect = lambda *a, **kw: call_order.append("avoidance_move")
+        mock_recorder.record_ranger.side_effect = lambda *a, **kw: call_order.append("record")
+
+        monitor = CollisionMonitor(mock_scf, event_queue, recorder=mock_recorder)
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        assert call_order == ["stop", "avoidance_move", "record", "record"]

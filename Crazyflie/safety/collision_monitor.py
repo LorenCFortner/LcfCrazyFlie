@@ -46,6 +46,7 @@ from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
 from Crazyflie.state.flight_state import FlightState
+from Crazyflie.telemetry.flight_recorder import FlightRecorder
 
 if TYPE_CHECKING:
     from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
@@ -230,6 +231,7 @@ class CollisionMonitor:
         min_distance_m: float = DEFAULT_MIN_DISTANCE_M,
         flight_state: FlightState | None = None,
         adaptive_corrector: AdaptivePathCorrector | None = None,
+        recorder: FlightRecorder | None = None,
     ) -> None:
         """Initialise the collision monitor.
 
@@ -244,12 +246,19 @@ class CollisionMonitor:
             adaptive_corrector: Optional AdaptivePathCorrector. When provided,
                 normal detection is paused while a correction is executing,
                 unless any sensor reads below _SIDE_CLEARANCE_M.
+            recorder: Optional FlightRecorder. When provided, every Multi-ranger
+                reading is written to its telemetry CSV — not just trigger/warn
+                events — including the pre-stop trigger reading, and (only when
+                a MotionCommander is attached, since only then does a stop and
+                avoidance move actually happen) the fresh post-stop reading
+                used to compute the avoidance move.
         """
         self._scf = scf
         self._event_queue = event_queue
         self._min_distance_m = min_distance_m
         self._flight_state = flight_state
         self._adaptive_corrector = adaptive_corrector
+        self._recorder = recorder
         self._stop_requested = False
         self._triggered = False
         self._mc: MotionCommander | None = None
@@ -344,6 +353,29 @@ class CollisionMonitor:
         if self._flight_state is not None:
             return self._flight_state.get_direction()
         return None
+
+    def _effective_velocity(self) -> float:
+        """Return the current commanded velocity from FlightState, or 0.0.
+
+        Returns:
+            Velocity in m/s from FlightState if provided, else 0.0.
+        """
+        if self._flight_state is not None:
+            return self._flight_state.get_velocity()
+        return 0.0
+
+    def _record_ranger(self, readings: MultiRangerReadings, context: str = "poll") -> None:
+        """Record a ranger reading to the telemetry recorder, if attached.
+
+        Args:
+            readings: Current MultiRangerReadings snapshot.
+            context: "poll", "trigger", or "post_stop" — see
+                FlightRecorder.record_ranger.
+        """
+        if self._recorder is not None:
+            self._recorder.record_ranger(
+                readings, self._effective_flight_direction(), self._effective_velocity(), context
+            )
 
     def _effective_diagonal_threshold(self) -> float:
         """Return the diagonal detection threshold for the current poll cycle.
@@ -470,6 +502,12 @@ class CollisionMonitor:
         Stops the drone, moves it away from the obstacle using velocity-scaled
         avoidance parameters, then posts "COLLISION" to the event queue.
 
+        The avoidance move is computed from a fresh reading taken *after*
+        mc.stop() (not the reading that caused the trigger) — momentum can
+        carry the drone further before it actually decelerates, so the
+        avoidance decision should reflect where the drone is now, not where
+        it was when detection fired.
+
         Separated from _run() so it can be exercised in unit tests
         without starting a real background thread.
 
@@ -480,15 +518,22 @@ class CollisionMonitor:
             return
         self._triggered = True
 
-        readings = ranger.get_readings()
+        trigger_readings = ranger.get_readings()
         threshold = self._effective_threshold()
-        _log_all_readings("COLLISION triggered", readings, threshold)
+        _log_all_readings("COLLISION triggered", trigger_readings, threshold)
+
+        post_stop_readings: MultiRangerReadings | None = None
 
         with self._lock:
             if self._mc is not None:
                 self._mc.stop()
+                # Fresh read used to decide the avoidance move — momentum can
+                # carry the drone further before it actually decelerates, so
+                # the decision uses where the drone is now, not the trigger
+                # reading above.
+                post_stop_readings = ranger.get_readings()
                 flight_direction = self._effective_flight_direction()
-                direction = find_avoidance_move(readings, flight_direction, threshold)
+                direction = find_avoidance_move(post_stop_readings, flight_direction, threshold)
                 if direction is None and flight_direction in _DIAGONAL_PAIRS:
                     direction = _FLIGHT_DIR_REVERSE.get(flight_direction)
                 if direction is not None:
@@ -506,6 +551,13 @@ class CollisionMonitor:
                         avoid_velocity,
                     )
                     getattr(self._mc, direction)(avoid_distance_m, velocity=avoid_velocity)
+
+            # Telemetry recorded last, strictly after mc.stop() and any
+            # avoidance move, so a disk write never delays a time-critical
+            # command.
+            self._record_ranger(trigger_readings, context="trigger")
+            if post_stop_readings is not None:
+                self._record_ranger(post_stop_readings, context="post_stop")
         self._event_queue.put("COLLISION")
 
     @staticmethod
@@ -542,6 +594,7 @@ class CollisionMonitor:
             if self._triggered:
                 return
             readings = ranger.get_readings()
+            self._record_ranger(readings)
             if self._adaptive_corrector is not None and self._adaptive_corrector.is_correcting():
                 if self._any_below_blade_clearance(readings):
                     self._trigger(ranger)
@@ -567,6 +620,7 @@ class CollisionMonitor:
         with MultiRangerDeck(self._scf) as ranger:
             while not self._stop_requested:
                 readings = ranger.get_readings()
+                self._record_ranger(readings)
                 if (
                     self._adaptive_corrector is not None
                     and self._adaptive_corrector.is_correcting()

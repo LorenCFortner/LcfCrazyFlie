@@ -8,7 +8,7 @@ CollisionMonitor so the detection threshold scales automatically with the
 velocity of each flight step.
 
 Pre-flight:
-  1. Clearance check — aborts if any direction is within 0.3 m.
+  1. Clearance check — aborts if any direction is within 0.1 m.
   2. LED headlights on.
 
 Post-flight: LED ring off.
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 URI = "radio://0/1/250K"
 _LOG_FILE: Path = Path(__file__).parent / "logs" / "safe_fly_out_and_back.log"
+_TELEMETRY_FILE: Path = Path(__file__).parent / "logs" / "safe_fly_out_and_back_telemetry.csv"
 _COLLISION_RETURN_VELOCITY: float = 0.5  # m/s — slower than outbound for unmonitored return
 _COLLISION_BACKUP_M: float = 0.2  # back up before turning to gain extra clearance
 
@@ -100,6 +101,7 @@ def main() -> None:
         uri=URI,
         description="fly 1 metre out and back",
         on_collision_fn=_on_collision,
+        telemetry_file=_TELEMETRY_FILE,
     )
 
 

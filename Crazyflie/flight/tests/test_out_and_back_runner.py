@@ -7,6 +7,7 @@ requiring a real drone connection.
 import queue
 import threading
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -388,7 +389,7 @@ def _mock_flight_hardware(mocker: Any, *, collision_triggered: bool = False) -> 
     mock_stabilizer.state.battery_v = 4.0
     mock_stabilizer.state.height_mm = 400
     mock_stabilizer.is_triggered.return_value = False
-    mocker.patch(
+    stabilizer_cls = mocker.patch(
         "Crazyflie.flight.out_and_back_runner.StabilizerMonitor", return_value=mock_stabilizer
     )
 
@@ -412,6 +413,7 @@ def _mock_flight_hardware(mocker: Any, *, collision_triggered: bool = False) -> 
         "mock_corrector": mock_corrector,
         "mock_collision": mock_collision,
         "mock_stabilizer": mock_stabilizer,
+        "stabilizer_cls": stabilizer_cls,
     }
 
 
@@ -487,3 +489,118 @@ class TestPostFlightEventWait:
         mock_handle_events = self._run_flight(mocker, collision_triggered=False)
 
         mock_handle_events.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# FlightRecorder wiring — telemetry_file param in run_out_and_back_flight()
+# ---------------------------------------------------------------------------
+
+
+class TestTelemetryWiring:
+    """run_out_and_back_flight() creates/starts/stops a FlightRecorder when
+    telemetry_file is provided, and passes it to both monitors.
+    """
+
+    def _run_flight(
+        self,
+        mocker: Any,
+        *,
+        telemetry_file: Path | None,
+        raise_in_flight: bool = False,
+        recorder_start_raises: bool = False,
+    ) -> dict[str, Any]:
+        path = [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)]
+        mocks = _mock_flight_hardware(mocker)
+
+        mock_recorder = mocker.MagicMock()
+        if recorder_start_raises:
+            mock_recorder.start.side_effect = OSError("disk full")
+        recorder_cls = mocker.patch(
+            "Crazyflie.flight.out_and_back_runner.FlightRecorder", return_value=mock_recorder
+        )
+
+        if raise_in_flight:
+            mocks["mock_corrector"].start.side_effect = RuntimeError("boom")
+
+        run_out_and_back_flight(
+            path, uri="radio://0/80/2M", description="test", telemetry_file=telemetry_file
+        )
+
+        return {"recorder_cls": recorder_cls, "mock_recorder": mock_recorder, **mocks}
+
+    def test_creates_and_starts_recorder_when_telemetry_file_given(self, mocker, tmp_path):
+        telemetry_file = tmp_path / "telemetry.csv"
+
+        result = self._run_flight(mocker, telemetry_file=telemetry_file)
+
+        result["recorder_cls"].assert_called_once()
+        result["mock_recorder"].start.assert_called_once_with(telemetry_file)
+
+    def test_passes_recorder_to_stabilizer_monitor(self, mocker, tmp_path):
+        telemetry_file = tmp_path / "telemetry.csv"
+
+        result = self._run_flight(mocker, telemetry_file=telemetry_file)
+
+        _, kwargs = result["stabilizer_cls"].call_args
+        assert kwargs.get("recorder") is result["mock_recorder"]
+
+    def test_passes_recorder_to_collision_monitor(self, mocker, tmp_path):
+        telemetry_file = tmp_path / "telemetry.csv"
+
+        result = self._run_flight(mocker, telemetry_file=telemetry_file)
+
+        _, kwargs = result["collision_cls"].call_args
+        assert kwargs.get("recorder") is result["mock_recorder"]
+
+    def test_stops_recorder_after_normal_completion(self, mocker, tmp_path):
+        telemetry_file = tmp_path / "telemetry.csv"
+
+        result = self._run_flight(mocker, telemetry_file=telemetry_file)
+
+        result["mock_recorder"].stop.assert_called_once()
+
+    def test_stops_recorder_even_when_flight_raises(self, mocker, tmp_path):
+        telemetry_file = tmp_path / "telemetry.csv"
+
+        result = self._run_flight(mocker, telemetry_file=telemetry_file, raise_in_flight=True)
+
+        result["mock_recorder"].stop.assert_called_once()
+
+    def test_no_recorder_created_when_telemetry_file_omitted(self, mocker):
+        result = self._run_flight(mocker, telemetry_file=None)
+
+        result["recorder_cls"].assert_not_called()
+
+    def test_monitors_receive_none_recorder_when_telemetry_file_omitted(self, mocker):
+        result = self._run_flight(mocker, telemetry_file=None)
+
+        _, stabilizer_kwargs = result["stabilizer_cls"].call_args
+        _, collision_kwargs = result["collision_cls"].call_args
+        assert stabilizer_kwargs.get("recorder") is None
+        assert collision_kwargs.get("recorder") is None
+
+    def test_recorder_start_failure_does_not_abort_the_flight(self, mocker, tmp_path):
+        """Telemetry is a diagnostic nice-to-have, not a safety feature — a
+        recorder.start() failure (unwritable logs dir, full disk) must not
+        propagate and skip the flight's own try/finally cleanup.
+        """
+        telemetry_file = tmp_path / "telemetry.csv"
+
+        result = self._run_flight(
+            mocker, telemetry_file=telemetry_file, recorder_start_raises=True
+        )  # should not raise
+
+        result["mock_collision"].stop.assert_called_once()
+        result["mock_collision"].join.assert_called_once()
+
+    def test_monitors_receive_none_recorder_when_start_fails(self, mocker, tmp_path):
+        telemetry_file = tmp_path / "telemetry.csv"
+
+        result = self._run_flight(
+            mocker, telemetry_file=telemetry_file, recorder_start_raises=True
+        )
+
+        _, stabilizer_kwargs = result["stabilizer_cls"].call_args
+        _, collision_kwargs = result["collision_cls"].call_args
+        assert stabilizer_kwargs.get("recorder") is None
+        assert collision_kwargs.get("recorder") is None

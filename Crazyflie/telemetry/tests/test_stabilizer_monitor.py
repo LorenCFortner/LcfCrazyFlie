@@ -389,6 +389,72 @@ class TestRun:
         assert monitor._first_reading_event.is_set()
 
 
+class TestFlightRecorderIntegration:
+    """StabilizerMonitor records every sample when a recorder is attached."""
+
+    def _make_log_entry(
+        self,
+        roll: float = 0.0,
+        pitch: float = 0.0,
+        yaw: float = 0.0,
+        height: int = 0,
+        battery_v: float = 4.0,
+        battery_state: int = 0,
+    ) -> tuple[object, dict[str, object], object]:
+        return (
+            None,
+            {
+                "stabilizer.roll": roll,
+                "stabilizer.pitch": pitch,
+                "stabilizer.yaw": yaw,
+                "range.zrange": height,
+                "pm.vbat": battery_v,
+                "pm.state": battery_state,
+            },
+            None,
+        )
+
+    def _patch_sync_logger(self, mocker, entries: list):
+        mock_logger = mocker.MagicMock()
+        mock_logger.__enter__ = mocker.MagicMock(return_value=mock_logger)
+        mock_logger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_logger.__iter__ = mocker.MagicMock(return_value=iter(entries))
+        mocker.patch(
+            "Crazyflie.telemetry.stabilizer_monitor.SyncLogger",
+            return_value=mock_logger,
+        )
+        mocker.patch("Crazyflie.telemetry.stabilizer_monitor.LogConfig")
+        return mock_logger
+
+    def test_records_state_on_each_reading_when_recorder_attached(
+        self, mock_scf, mock_queue, mocker
+    ):
+        mock_recorder = mocker.MagicMock()
+        self._patch_sync_logger(mocker, [self._make_log_entry(roll=5.0, height=300)])
+        monitor = StabilizerMonitor(mock_scf, mock_queue, recorder=mock_recorder)
+
+        monitor._run()
+
+        mock_recorder.record_stabilizer.assert_called_once_with(monitor.state)
+
+    def test_records_once_per_log_entry(self, mock_scf, mock_queue, mocker):
+        mock_recorder = mocker.MagicMock()
+        self._patch_sync_logger(
+            mocker, [self._make_log_entry(roll=1.0), self._make_log_entry(roll=2.0)]
+        )
+        monitor = StabilizerMonitor(mock_scf, mock_queue, recorder=mock_recorder)
+
+        monitor._run()
+
+        assert mock_recorder.record_stabilizer.call_count == 2
+
+    def test_does_not_record_when_no_recorder(self, mock_scf, mock_queue, mocker):
+        self._patch_sync_logger(mocker, [self._make_log_entry()])
+        monitor = StabilizerMonitor(mock_scf, mock_queue)
+
+        monitor._run()  # should not raise without a recorder
+
+
 class TestWaitForFirstReading:
     def test_returns_true_when_event_already_set(self, mock_scf, mock_queue):
         monitor = StabilizerMonitor(mock_scf, mock_queue)

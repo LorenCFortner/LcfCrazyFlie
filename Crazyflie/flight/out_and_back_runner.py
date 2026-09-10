@@ -12,6 +12,7 @@ import logging
 import queue
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import cflib.crtp
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
@@ -27,6 +28,7 @@ from Crazyflie.safety.collision_monitor import CollisionMonitor
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
 from Crazyflie.safety.takeoff_verifier import verify_takeoff
 from Crazyflie.state.flight_state import FlightState
+from Crazyflie.telemetry.flight_recorder import FlightRecorder
 from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
 logger = logging.getLogger(__name__)
@@ -162,6 +164,7 @@ def run_out_and_back_flight(
     pre_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
     post_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
     on_collision_fn: OnCollisionFn | None = None,
+    telemetry_file: Path | None = None,
 ) -> None:
     """Execute a path out-and-back flight with full safety architecture.
 
@@ -186,6 +189,10 @@ def run_out_and_back_flight(
             flight progress, a should_abort callable for detecting a second
             collision during the response, the shared FlightState, and the
             shared AdaptivePathCorrector. Defaults to mc.land() when None.
+        telemetry_file: Optional path to write continuous sensor telemetry
+            (every Multi-ranger reading and stabilizer sample, not just
+            WARNING-level events) to as CSV. When None, no telemetry is
+            recorded.
     """
     _pre = pre_flight_fn if pre_flight_fn is not None else _default_pre_flight
     _post = post_flight_fn if post_flight_fn is not None else _default_post_flight
@@ -212,7 +219,21 @@ def run_out_and_back_flight(
 
         _pre(scf)
 
-        stabilizer_monitor = StabilizerMonitor(scf, event_queue)
+        recorder: FlightRecorder | None = None
+        if telemetry_file is not None:
+            recorder = FlightRecorder()
+            try:
+                recorder.start(telemetry_file)
+            except OSError as exc:
+                # Telemetry is a diagnostic nice-to-have, not a safety
+                # feature — a failure here (unwritable logs dir, full disk)
+                # must never abort a flight that's already armed, or skip
+                # the try/finally cleanup below by propagating out of this
+                # `with SyncCrazyflie` block.
+                logger.error(f"Failed to start telemetry recording to {telemetry_file}: {exc}")
+                recorder = None
+
+        stabilizer_monitor = StabilizerMonitor(scf, event_queue, recorder=recorder)
         stabilizer_monitor.start()
 
         adaptive_corrector = AdaptivePathCorrector(scf, flight_state)
@@ -224,6 +245,7 @@ def run_out_and_back_flight(
             event_queue,
             flight_state=flight_state,
             adaptive_corrector=adaptive_corrector,
+            recorder=recorder,
         )
 
         stabilizer_monitor.wait_for_first_reading()
@@ -310,6 +332,8 @@ def run_out_and_back_flight(
             flight_time = time.time() - flight_start
             stabilizer_monitor.stop()
             stabilizer_monitor.join()
+            if recorder is not None:
+                recorder.stop()
             try:
                 _post(scf)
             except Exception:

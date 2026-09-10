@@ -12,7 +12,7 @@ Route (outbound leg — run_out_and_back retraces in reverse to return home):
   left 0.3 m   → forward 0.3 m → left 0.3 m
 
 Pre-flight:
-  1. Clearance check — aborts if any direction is within 0.3 m.
+  1. Clearance check — aborts if any direction is within 0.1 m.
   2. LED headlights on.
 
 Post-flight: LED ring off.
@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 URI = "radio://0/1/250K"
 _LOG_FILE: Path = Path(__file__).parent / "logs" / "safe_flight_around_house.log"
+_TELEMETRY_FILE: Path = Path(__file__).parent / "logs" / "safe_flight_around_house_telemetry.csv"
 
 HOUSE_PATH = [
     FlightStep("forward", 1.6, velocity=0.5),
@@ -98,6 +99,7 @@ def main() -> None:
         uri=URI,
         description="fly house route and retrace home",
         on_collision_fn=_on_collision,
+        telemetry_file=_TELEMETRY_FILE,
     )
 
 

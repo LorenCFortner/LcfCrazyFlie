@@ -24,6 +24,8 @@ from cflib.crazyflie.log import LogConfig
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.crazyflie.syncLogger import SyncLogger
 
+from Crazyflie.telemetry.flight_recorder import FlightRecorder
+
 MIN_BATTERY_VOLTAGE_V = 3.4
 MAX_ROLL_DEG = 20.0
 MAX_PITCH_DEG = 20.0
@@ -154,6 +156,7 @@ class StabilizerMonitor:
         max_pitch_deg: float = MAX_PITCH_DEG,
         min_battery_v: float = MIN_BATTERY_VOLTAGE_V,
         ms_between_updates: int = MS_BETWEEN_UPDATES,
+        recorder: FlightRecorder | None = None,
     ) -> None:
         """Initialize the monitor.
 
@@ -164,6 +167,9 @@ class StabilizerMonitor:
             max_pitch_deg: Pitch limit before CRASH is posted.
             min_battery_v: Voltage below which BATLOW is posted.
             ms_between_updates: Telemetry poll rate in milliseconds.
+            recorder: Optional FlightRecorder. When provided, every
+                telemetry sample (not just BATLOW/CRASH events) is written
+                to its telemetry CSV.
         """
         self._scf = scf
         self._event_queue = event_queue
@@ -171,6 +177,7 @@ class StabilizerMonitor:
         self._max_pitch_deg = max_pitch_deg
         self._min_battery_v = min_battery_v
         self._ms_between_updates = ms_between_updates
+        self._recorder = recorder
         self.state = DroneState()
         self._stop_requested = False
         self._triggered = False
@@ -241,6 +248,8 @@ class StabilizerMonitor:
 
                 data = log_entry[1]
                 update_state_from_log(self.state, data)
+                if self._recorder is not None:
+                    self._recorder.record_stabilizer(self.state)
                 self._first_reading_event.set()
                 roll_bad = check_roll(self.state, self._max_roll_deg, self._event_queue)
                 pitch_bad = check_pitch(self.state, self._max_pitch_deg, self._event_queue)

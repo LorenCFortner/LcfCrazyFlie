@@ -20,18 +20,21 @@ the obstacle was detected.
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.flight.collision_return import CollisionContext
 from Crazyflie.flight.out_and_back_runner import run_out_and_back_flight
 from Crazyflie.flight.path_runner import FlightStep
+from Crazyflie.observability.run_logging import configure_run_logging
 from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
 from Crazyflie.state.flight_state import FlightState
 
 logger = logging.getLogger(__name__)
 
 URI = "radio://0/1/250K"
+_LOG_FILE: Path = Path(__file__).parent / "logs" / "safe_fly_out_and_back.log"
 _COLLISION_RETURN_VELOCITY: float = 0.5  # m/s — slower than outbound for unmonitored return
 _COLLISION_BACKUP_M: float = 0.2  # back up before turning to gain extra clearance
 
@@ -83,11 +86,14 @@ def _on_collision(
 
 
 def main() -> None:
-    """Main entry point for the safe fly-out-and-back script."""
+    """Main entry point for the safe fly-out-and-back script.
+
+    Console output stays at WARNING+; a full INFO+ trace of the run is
+    additionally written to _LOG_FILE, overwritten each run.
+    """
     logging.basicConfig(level=logging.ERROR)
-    logging.getLogger("cflib").setLevel(logging.CRITICAL)
-    logging.getLogger(__name__).setLevel(logging.INFO)
-    logging.getLogger("Crazyflie").setLevel(logging.WARNING)
+    configure_run_logging(__name__, _LOG_FILE)
+    logger.info(f"Writing full run log to {_LOG_FILE}")
 
     run_out_and_back_flight(
         OUT_AND_BACK_PATH,

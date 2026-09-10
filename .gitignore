@@ -17,3 +17,6 @@ htmlcov/
 
 # Ruff
 .ruff_cache/
+
+# Flight run logs
+scripts/logs/

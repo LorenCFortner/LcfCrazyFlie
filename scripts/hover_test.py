@@ -9,12 +9,14 @@ Post-flight: LED ring off.
 import logging
 import queue
 import time
+from pathlib import Path
 
 import cflib.crtp
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.decks.led_ring import LedRingDeck
+from Crazyflie.observability.run_logging import configure_run_logging
 from Crazyflie.safety.collision_monitor import CollisionMonitor
 from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
 from Crazyflie.safety.takeoff_verifier import verify_takeoff
@@ -23,6 +25,7 @@ from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 URI = "radio://0/1/250K"
 HOVER_DURATION_S = 10.0
 _POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
+_LOG_FILE: Path = Path(__file__).parent / "logs" / "hover_test.log"
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +92,14 @@ def handle_safety_events(
 
 
 def main() -> None:
-    """Main entry point for the hover test script."""
+    """Main entry point for the hover test script.
+
+    Console output stays at WARNING+; a full INFO+ trace of the run is
+    additionally written to _LOG_FILE, overwritten each run.
+    """
     logging.basicConfig(level=logging.ERROR)
-    logging.getLogger("cflib").setLevel(logging.CRITICAL)
-    logging.getLogger(__name__).setLevel(logging.INFO)
+    configure_run_logging(__name__, _LOG_FILE)
+    logger.info(f"Writing full run log to {_LOG_FILE}")
 
     cflib.crtp.init_drivers(enable_debug_driver=False)
 

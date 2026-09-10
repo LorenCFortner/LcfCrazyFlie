@@ -27,18 +27,21 @@ obstacle for clearance and lands instead of continuing home.
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.flight.collision_return import CollisionContext, fly_home_after_collision
 from Crazyflie.flight.out_and_back_runner import run_out_and_back_flight
 from Crazyflie.flight.path_runner import FlightStep
+from Crazyflie.observability.run_logging import configure_run_logging
 from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
 from Crazyflie.state.flight_state import FlightState
 
 logger = logging.getLogger(__name__)
 
 URI = "radio://0/1/250K"
+_LOG_FILE: Path = Path(__file__).parent / "logs" / "safe_flight_around_house.log"
 
 HOUSE_PATH = [
     FlightStep("forward", 1.6, velocity=0.5),
@@ -80,11 +83,15 @@ def _on_collision(
 
 
 def main() -> None:
-    """Main entry point for the safe flight-around-the-house script."""
+    """Main entry point for the safe flight-around-the-house script.
+
+    Console output stays at WARNING+; a full INFO+ trace of the run —
+    including the retrace/collision-response detail suppressed on the
+    console — is additionally written to _LOG_FILE, overwritten each run.
+    """
     logging.basicConfig(level=logging.ERROR)
-    logging.getLogger("cflib").setLevel(logging.CRITICAL)
-    logging.getLogger(__name__).setLevel(logging.INFO)
-    logging.getLogger("Crazyflie").setLevel(logging.WARNING)
+    configure_run_logging(__name__, _LOG_FILE)
+    logger.info(f"Writing full run log to {_LOG_FILE}")
 
     run_out_and_back_flight(
         HOUSE_PATH,

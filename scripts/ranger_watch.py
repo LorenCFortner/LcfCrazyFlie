@@ -8,24 +8,33 @@ Useful for verifying deck connectivity and observing raw sensor values.
 
 import logging
 import time
+from pathlib import Path
 
 import cflib.crtp
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 
 from Crazyflie.decks.multi_ranger import MultiRangerDeck
+from Crazyflie.observability.run_logging import configure_run_logging
 
 URI = "radio://0/1/250K"
 POLL_INTERVAL_S = 0.1
 _POST_DISCONNECT_SLEEP_S = 5.0  # Allow drone radio to reset before next run.
+_LOG_FILE: Path = Path(__file__).parent / "logs" / "ranger_watch.log"
 
 logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    """Stream ranger readings continuously until Ctrl+C."""
+    """Stream ranger readings continuously until Ctrl+C.
+
+    Console output stays at WARNING+; a full INFO+ trace of every reading is
+    additionally written to _LOG_FILE, overwritten each run. Note this file
+    grows for the entire session (not just one flight) since this script
+    streams continuously until interrupted.
+    """
     logging.basicConfig(level=logging.ERROR)
-    logging.getLogger("cflib").setLevel(logging.CRITICAL)
-    logging.getLogger(__name__).setLevel(logging.INFO)
+    configure_run_logging(__name__, _LOG_FILE)
+    logger.info(f"Writing full run log to {_LOG_FILE}")
 
     cflib.crtp.init_drivers(enable_debug_driver=False)
 

@@ -6,13 +6,13 @@ when an obstacle enters the adaptive zone:
     (side_threshold(v), side_threshold(v) + ADAPTIVE_BAND_WIDTH_M)
 
 where side_threshold(v) is CollisionMonitor's own velocity-scaled side
-threshold (_SIDE_CLEARANCE_M + v * _REACTION_S — see collision_monitor.py).
+threshold (_SIDE_CLEARANCE_M + v * _REACTION_S - see collision_monitor.py).
 The zone therefore sits just outside (farther than) whatever distance
 CollisionMonitor would itself trigger a COLLISION at, at the drone's current
 velocity: as an obstacle closes in, the adaptive zone is always reached
 first, giving the correction a chance to act before CollisionMonitor's own
 threshold is reached. A flat zone that didn't scale with velocity would be
-overtaken by CollisionMonitor's threshold at realistic flight speeds — at
+overtaken by CollisionMonitor's threshold at realistic flight speeds - at
 v=0 the two formulas coincide (side_threshold(0) == _SIDE_CLEARANCE_M), so
 this reduces to the original fixed (0.10, 0.15) m zone at rest.
 
@@ -49,7 +49,7 @@ from Crazyflie.state.flight_state import FlightState
 logger = logging.getLogger(__name__)
 
 # Width of the adaptive correction zone, measured above (farther than)
-# CollisionMonitor's own velocity-scaled side threshold — see module
+# CollisionMonitor's own velocity-scaled side threshold - see module
 # docstring. Kept equal to the original fixed zone's width (0.15 - 0.10)
 # so the zone's size at any given velocity is unchanged from the original
 # design; only where it sits (relative to the now velocity-scaled collision
@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 ADAPTIVE_BAND_WIDTH_M: float = 0.05
 ADAPTIVE_TURN_DEG: float = 15.0  # yaw correction magnitude (degrees)
 ADAPTIVE_TURN_RATE_DEG_S: float = 90.0  # yaw correction speed (deg/s)
-ADAPTIVE_VERT_NUDGE_M: float = 0.08  # vertical correction for up-sensor (metres)
+ADAPTIVE_VERT_NUDGE_M: float = 0.08  # vertical correction for up-sensor (meters)
 ADAPTIVE_VERT_VELOCITY: float = 0.30  # vertical correction speed (m/s)
 ADAPTIVE_COOLDOWN_S: float = 1.0  # minimum seconds between corrections
 
@@ -97,7 +97,7 @@ class AdaptivePathCorrector:
     """
 
     def __init__(self, scf: SyncCrazyflie, flight_state: FlightState) -> None:
-        """Initialise the corrector.
+        """Initialize the corrector.
 
         Args:
             scf: Connected SyncCrazyflie instance (passed to MultiRangerDeck).
@@ -249,7 +249,7 @@ class AdaptivePathCorrector:
             if sensor_name == "up":
                 self._correction = ("down", ADAPTIVE_VERT_NUDGE_M)
                 logger.info(
-                    "Adaptive: up sensor %.3f m — nudging down %.2f m",
+                    "Adaptive: up sensor %.3f m - nudging down %.2f m",
                     value,
                     ADAPTIVE_VERT_NUDGE_M,
                 )
@@ -259,7 +259,7 @@ class AdaptivePathCorrector:
             if turn_cmd is not None:
                 self._correction = (turn_cmd, ADAPTIVE_TURN_DEG)
                 logger.info(
-                    "Adaptive: %s sensor %.3f m while flying %s — %s %.0f°",
+                    "Adaptive: %s sensor %.3f m while flying %s - %s %.0f°",
                     sensor_name,
                     value,
                     direction,

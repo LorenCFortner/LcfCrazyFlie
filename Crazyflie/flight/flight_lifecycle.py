@@ -8,7 +8,7 @@ wall-following). run_flight_lifecycle() owns everything both runners need
 identically; each runner supplies only its flight-specific middle section as
 a flight_body_fn, plus any FlightLifecycleHooks it needs.
 
-This is a pure extraction — no behavioural change to either existing runner.
+This is a pure extraction - no behavioral change to either existing runner.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ _POST_DISCONNECT_SLEEP_S: float = 5.0  # Allow drone radio to reset before next 
 _STABILIZE_STEPS: int = 3  # One-second hover/log steps before the flight body runs.
 
 # CollisionMonitor._trigger() sets is_triggered()=True before its blocking
-# avoidance move finishes and queues "COLLISION" — worst case ~0.3-0.7 s at
+# avoidance move finishes and queues "COLLISION" - worst case ~0.3-0.7 s at
 # MAX_SAFE_VELOCITY_M_S. This is how long a post-body event check should block
 # for that event to actually arrive, so should_abort()==True is never followed
 # by a landing sequence that races the avoidance move still driving mc from
@@ -91,7 +91,7 @@ class FlightLifecycleHooks:
             construct an AdaptivePathCorrector for runners that use one (path
             flights, for straight-line drift correction). Left None for
             flight modes that don't need it (e.g. wall-following, whose own
-            closed loop already handles heading/standoff correction) — no
+            closed loop already handles heading/standoff correction) - no
             AdaptivePathCorrector is constructed or started/stopped in that
             case.
     """
@@ -113,7 +113,7 @@ class FlightContext:
     flight_state, collision_monitor and adaptive_corrector to fly, plus
     event_queue and stabilizer_monitor so its own post-body
     `if should_abort(): handle_safety_events(...)` check (each flight body
-    owns that check itself — see handle_safety_events()'s docstring) has
+    owns that check itself - see handle_safety_events()'s docstring) has
     everything it needs.
 
     Attributes:
@@ -157,7 +157,7 @@ def handle_safety_events(
 ) -> bool:
     """Drain the event queue and react to any CRASH/BATLOW/COLLISION event.
 
-    Shared by every flight_body_fn — each one calls this itself right after
+    Shared by every flight_body_fn - each one calls this itself right after
     its own `if should_abort():` check, rather than run_flight_lifecycle()
     calling it automatically after the body returns. The body is what
     constructs any SafeFlightController (and therefore owns flight_log) and
@@ -170,8 +170,8 @@ def handle_safety_events(
     second collision during the response is detectable via its own
     is_triggered method, which is passed as on_collision_fn's should_abort.
     Without on_collision_fn, a COLLISION always just lands in place
-    (mc.land()) — the behaviour every flight mode had before any of them
-    grew a collision-response hook, and still the only behaviour
+    (mc.land()) - the behavior every flight mode had before any of them
+    grew a collision-response hook, and still the only behavior
     wall-following uses (a wall follow has no recorded path to retrace).
 
     Args:
@@ -199,7 +199,7 @@ def handle_safety_events(
         block_timeout_s: When > 0, wait up to this many seconds for an event
             to appear instead of checking once. A caller that already knows
             a monitor triggered (should_abort() is True) should block rather
-            than check once and miss it — CollisionMonitor sets
+            than check once and miss it - CollisionMonitor sets
             is_triggered() True before its blocking avoidance move finishes
             and queues "COLLISION". Defaults to 0.0 (non-blocking).
 
@@ -218,10 +218,10 @@ def handle_safety_events(
     stabilizer_monitor.stop()
 
     if event == "CRASH":
-        logger.warning("CRASH detected — emergency landing.")
+        logger.warning("CRASH detected - emergency landing.")
         land_immediately(mc)
     elif event == "BATLOW":
-        logger.warning("Low battery — landing now.")
+        logger.warning("Low battery - landing now.")
         land_on_low_battery(mc)
     elif event == "COLLISION":
         if on_collision_fn is not None:
@@ -233,17 +233,17 @@ def handle_safety_events(
             else:
                 should_abort = _never_abort
             logger.warning(
-                f"Obstacle detected — avoidance complete, executing collision response"
+                f"Obstacle detected - avoidance complete, executing collision response"
                 f" ({len(context.flight_log)} logged step(s))."
             )
             on_collision_fn(
                 mc, context, should_abort, flight_state or FlightState(), adaptive_corrector
             )
         else:
-            logger.warning("Obstacle detected — avoidance complete, landing now.")
+            logger.warning("Obstacle detected - avoidance complete, landing now.")
             mc.land()
     else:
-        logger.warning(f"Unknown event '{event}' — landing immediately as precaution.")
+        logger.warning(f"Unknown event '{event}' - landing immediately as precaution.")
         land_immediately(mc)
 
     return True
@@ -259,7 +259,7 @@ def run_flight_lifecycle(
 
     Connects to the drone, checks clearance, starts safety monitors, verifies
     takeoff, then calls flight_body_fn to fly whatever this flight mode does
-    — then tears everything down. Blocks until the drone has disconnected and
+    - then tears everything down. Blocks until the drone has disconnected and
     the post-disconnect sleep has elapsed.
 
     Args:
@@ -297,7 +297,7 @@ def run_flight_lifecycle(
 
         logger.info("Checking pre-flight clearance...")
         if not check_preflight_clearance(scf):
-            logger.error("Pre-flight clearance check FAILED — too close to an obstacle. Aborting.")
+            logger.error("Pre-flight clearance check FAILED - too close to an obstacle. Aborting.")
             return
         logger.info("Clearance OK.")
 
@@ -310,7 +310,7 @@ def run_flight_lifecycle(
                 recorder.start(telemetry_file)
             except OSError as exc:
                 # Telemetry is a diagnostic nice-to-have, not a safety
-                # feature — a failure here must never abort a flight that's
+                # feature - a failure here must never abort a flight that's
                 # already armed, or skip the try/finally cleanup below by
                 # propagating out of this `with SyncCrazyflie` block.
                 logger.error(f"Failed to start telemetry recording to {telemetry_file}: {exc}")
@@ -344,14 +344,14 @@ def run_flight_lifecycle(
         try:
             with MotionCommander(scf) as mc:
                 # Start collision monitoring (and any adaptive corrector)
-                # only once airborne — clearance check already guards
+                # only once airborne - clearance check already guards
                 # pre-takeoff proximity, and ground-level sensor readings
                 # fluctuate and can spuriously trigger a COLLISION event.
                 if adaptive_corrector is not None:
                     adaptive_corrector.start()
                 collision_monitor.start()
                 collision_monitor.attach_motion_commander(mc)
-                logger.info(f"Airborne — stabilizing for {_STABILIZE_STEPS} seconds...")
+                logger.info(f"Airborne - stabilizing for {_STABILIZE_STEPS} seconds...")
                 for i in range(_STABILIZE_STEPS):
                     time.sleep(1.0)
                     height_cm = stabilizer_monitor.state.height_mm / 10.0

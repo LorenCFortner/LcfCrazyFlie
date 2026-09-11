@@ -22,7 +22,7 @@ class FlowDeckReadings:
     """Snapshot of flow deck sensor readings.
 
     Attributes:
-        height_mm: Height above ground from range.zrange in millimetres,
+        height_mm: Height above ground from range.zrange in millimeters,
             or None if no data has arrived yet.
         delta_x: Optical flow X count from motion.deltaX,
             or None if no data has arrived yet.
@@ -39,7 +39,7 @@ class FlowDeck:
     """Streams height and optical flow data from the flow deck.
 
     Reads range.zrange (mm), motion.deltaX, and motion.deltaY via LogConfig
-    at 100 ms intervals. Use as a context manager — logging starts on entry
+    at 100 ms intervals. Use as a context manager - logging starts on entry
     and stops on exit.
 
     Example:
@@ -55,7 +55,7 @@ class FlowDeck:
     """
 
     def __init__(self, scf: SyncCrazyflie) -> None:
-        """Initialise the deck interface.
+        """Initialize the deck interface.
 
         Args:
             scf: Connected SyncCrazyflie instance.
@@ -95,7 +95,7 @@ class FlowDeck:
 
     @property
     def height_mm(self) -> float | None:
-        """Height above ground in millimetres, or None if no data yet."""
+        """Height above ground in millimeters, or None if no data yet."""
         return self._height_mm
 
     @property
@@ -134,7 +134,7 @@ class FlowDeck:
             timeout_s: Maximum time to wait for a reading. Defaults to 2.0s.
 
         Returns:
-            Height above ground in millimetres, or None on timeout.
+            Height above ground in millimeters, or None on timeout.
         """
         container: dict[str, float] = {}
         ready = Event()

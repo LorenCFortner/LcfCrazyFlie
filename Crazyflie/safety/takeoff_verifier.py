@@ -13,7 +13,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MIN_TAKEOFF_HEIGHT_DELTA_MM: int = 100  # 10 cm — well below hover height (~40 cm)
+MIN_TAKEOFF_HEIGHT_DELTA_MM: int = 100  # 10 cm - well below hover height (~40 cm)
 MIN_VOLTAGE_DROP_V: float = 0.05  # 50 mV sag expected under motor load
 
 
@@ -25,7 +25,7 @@ def verify_takeoff(
 ) -> bool:
     """Confirm the drone left the ground by checking height and voltage change.
 
-    A takeoff is considered failed only when BOTH signals are flat — height
+    A takeoff is considered failed only when BOTH signals are flat - height
     unchanged and no voltage sag. Either signal alone is sufficient to confirm
     the motors engaged.
 
@@ -46,7 +46,7 @@ def verify_takeoff(
 
     if not height_ok and not voltage_ok:
         logger.error(
-            "Takeoff failed — height: %d mm (was %d mm, delta %d mm, need >= %d mm);"
+            "Takeoff failed - height: %d mm (was %d mm, delta %d mm, need >= %d mm);"
             " battery: %.2f V (was %.2f V, drop %.3f V, need >= %.2f V)."
             " Motors did not engage. Aborting flight.",
             height_mm,

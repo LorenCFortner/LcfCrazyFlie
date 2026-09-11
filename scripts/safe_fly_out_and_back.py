@@ -1,4 +1,4 @@
-"""Fly 1 metre forward and back using interruptable safety architecture.
+"""Fly 1 meter forward and back using interruptable safety architecture.
 
 Uses SafeFlightController so CollisionMonitor and StabilizerMonitor can
 interrupt any movement mid-execution (every 50 ms), not only between steps.
@@ -9,15 +9,15 @@ velocity of each flight step.
 
 Outbound velocity is 0.25 m/s (reduced from 0.3 m/s). CollisionMonitor's
 side-sensor threshold is now additive with velocity (SIDE_CLEARANCE_M +
-velocity * REACTION_S — see Crazyflie.safety.collision_monitor), so this
+velocity * REACTION_S - see Crazyflie.safety.collision_monitor), so this
 keeps the lateral threshold at a forgiving ~0.26 m rather than the ~0.30 m
 0.3 m/s would give. Re-fly and observe this route before trusting it at the
 new speed. Note the collision-response leg (_COLLISION_RETURN_VELOCITY) is
 a direct mc.back()/mc.forward() call outside SafeFlightController, not a
-FlightStep, and was left at 0.5 m/s — out of scope for this change.
+FlightStep, and was left at 0.5 m/s - out of scope for this change.
 
 Pre-flight:
-  1. Clearance check — aborts if any direction is within 0.1 m.
+  1. Clearance check - aborts if any direction is within 0.1 m.
   2. LED headlights on.
 
 Post-flight: LED ring off.
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 URI = "radio://0/1/250K"
 _LOG_FILE: Path = Path(__file__).parent / "logs" / "safe_fly_out_and_back.log"
 _TELEMETRY_FILE: Path = Path(__file__).parent / "logs" / "safe_fly_out_and_back_telemetry.csv"
-_COLLISION_RETURN_VELOCITY: float = 0.5  # m/s — NOTE: now 2x the 0.25 m/s outbound leg;
+_COLLISION_RETURN_VELOCITY: float = 0.5  # m/s - NOTE: now 2x the 0.25 m/s outbound leg;
 # unmonitored return, deliberately left unchanged by the side-threshold reduction (see docstring)
 _COLLISION_BACKUP_M: float = 0.2  # back up before turning to gain extra clearance
 
@@ -63,15 +63,15 @@ def _on_collision(
 ) -> None:
     """Back up, turn 180°, then fly home the remaining distance.
 
-    Preserves this script's original unmonitored behaviour: should_abort,
+    Preserves this script's original unmonitored behavior: should_abort,
     flight_state, and adaptive_corrector are unused, and the return leg is a
     direct fly-back rather than a turn-by-turn retrace. That is safe here
     because OUT_AND_BACK_PATH is a single straight leg, so the flown linear
-    distance is unambiguous — but only forward/back entries are summed.
+    distance is unambiguous - but only forward/back entries are summed.
     run_out_and_back always flies a 180° pivot between the outbound and
     return legs, and a collision during the return leg means flight_log also
     contains that pivot's turn_right entry, whose distance_m is in
-    *degrees*, not metres; including it would corrupt the total.
+    *degrees*, not meters; including it would corrupt the total.
 
     Backs up _COLLISION_BACKUP_M for clearance before turning, then flies
     forward the outstanding distance to return to the start point.
@@ -79,9 +79,9 @@ def _on_collision(
     Args:
         mc: Active MotionCommander instance.
         context: Flight progress snapshot from the collision.
-        should_abort: Unused — this script's return leg is unmonitored.
-        flight_state: Unused — this script's return leg is unmonitored.
-        adaptive_corrector: Unused — this script's return leg is unmonitored.
+        should_abort: Unused - this script's return leg is unmonitored.
+        flight_state: Unused - this script's return leg is unmonitored.
+        adaptive_corrector: Unused - this script's return leg is unmonitored.
     """
     distance_m = sum(
         step.distance_m for step in context.flight_log if step.command in ("forward", "back")
@@ -109,7 +109,7 @@ def main() -> None:
     run_out_and_back_flight(
         OUT_AND_BACK_PATH,
         uri=URI,
-        description="fly 1 metre out and back",
+        description="fly 1 meter out and back",
         on_collision_fn=_on_collision,
         telemetry_file=_TELEMETRY_FILE,
     )

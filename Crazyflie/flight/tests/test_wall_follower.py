@@ -7,7 +7,7 @@ import math
 
 import pytest
 
-from Crazyflie.decks.multi_ranger import MultiRangerReadings
+from Crazyflie.decks.multi_ranger import MAX_RANGE_M, MultiRangerReadings
 from Crazyflie.flight.wall_follower import (
     FLIGHT_DIRECTION,
     FollowCommand,
@@ -25,7 +25,7 @@ def _readings(front=None, back=None, left=None, right=None, up=None) -> MultiRan
 
 
 # ---------------------------------------------------------------------------
-# compute_follow_command — pure function, the bulk of the control law
+# compute_follow_command - pure function, the bulk of the control law
 # ---------------------------------------------------------------------------
 
 
@@ -104,21 +104,37 @@ class TestComputeFollowCommand:
     @pytest.mark.parametrize(
         "front,right",
         [
-            (None, 0.5),
             (0.5, None),
             (None, None),
-            (0.0, 0.5),
             (0.5, 0.0),
-            (-0.1, 0.5),
             (0.5, -0.1),
         ],
     )
-    def test_missing_or_invalid_reading_gives_zero_command(self, front, right):
+    def test_right_missing_or_invalid_gives_zero_command(self, front, right):
+        """right is the wall actually being followed -- if it's missing or
+        invalid, the wall is genuinely lost regardless of front.
+        """
         follower = WallFollower(WallFollowConfig())
 
         command = follower.compute_follow_command(front=front, right=right)
 
         assert command == FollowCommand(vx=0.0, vy=0.0, yaw_rate_deg_s=0.0, wall_visible=False)
+
+    @pytest.mark.parametrize("front", [None, 0.0, -0.1])
+    def test_front_missing_or_invalid_substitutes_max_range(self, front):
+        """A missing/invalid front means "nothing within MAX_RANGE_M" per
+        Crazyflie.decks.multi_ranger's own convention -- not "unreadable,
+        stop". It substitutes MAX_RANGE_M and flows through the same
+        formula a real far reading would.
+        """
+        follower = WallFollower(WallFollowConfig())
+        right = 0.40
+
+        command = follower.compute_follow_command(front=front, right=right)
+        expected = follower.compute_follow_command(front=MAX_RANGE_M, right=right)
+
+        assert command == expected
+        assert command.wall_visible is True
 
     def test_is_a_pure_function_no_side_effects(self):
         """No MotionCommander, thread, sleep, or drone reference anywhere."""
@@ -131,7 +147,7 @@ class TestComputeFollowCommand:
 
 
 # ---------------------------------------------------------------------------
-# Front-proximity brake — throttles forward push as `front` closes on
+# Front-proximity brake - throttles forward push as `front` closes on
 # anything (corner, protrusion, person), independent of heading/standoff.
 # Mirrors AdaptivePathCorrector's velocity-scaled zone, shaped after
 # CollisionMonitor's own leading-sensor threshold formula.
@@ -272,6 +288,55 @@ class TestFrontProximityBrake:
 
 
 # ---------------------------------------------------------------------------
+# Missing front -> treated as MAX_RANGE_M ("nothing within sensor range",
+# per Crazyflie.decks.multi_ranger's own convention), not "wall lost".
+# Reproduces scripts/logs/right_wall_follow.log's 08:58:12 run, where a
+# permanently-None front (right still valid) false-triggered
+# wall_lost_timeout_s.
+# ---------------------------------------------------------------------------
+
+
+class TestFrontOutOfRangeRotatesBackToWall:
+    def test_yaw_clamped_toward_wall_when_front_missing(self):
+        """The literal "rotate the sensor back toward the wall" requirement:
+        with front out of range and right at a typical following distance,
+        yaw is clamped to its maximum turning toward the wall.
+        """
+        follower = WallFollower(WallFollowConfig())
+
+        command = follower.compute_follow_command(front=None, right=0.40)
+
+        assert command.yaw_rate_deg_s == pytest.approx(-WallFollowConfig().max_yaw_rate_deg_s)
+
+    def test_front_brake_is_fully_open_when_front_missing(self):
+        """front_scale == 1.0 -- nothing detected ahead means no braking."""
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        right = 0.40
+
+        command = follower.compute_follow_command(front=None, right=right)
+        unbraked_vx, unbraked_vy = _unbraked_vx_vy(cfg, MAX_RANGE_M, right)
+        speed = math.hypot(unbraked_vx, unbraked_vy)
+        if speed > cfg.max_velocity_m_s and speed > 0.0:
+            scale = cfg.max_velocity_m_s / speed
+            unbraked_vx *= scale
+            unbraked_vy *= scale
+
+        assert command.vx == pytest.approx(unbraked_vx)
+        assert command.vy == pytest.approx(unbraked_vy)
+
+    def test_right_missing_still_treated_as_wall_lost(self):
+        """The one case that must NOT change: right missing means the
+        followed wall is genuinely gone, regardless of front.
+        """
+        follower = WallFollower(WallFollowConfig())
+
+        command = follower.compute_follow_command(front=0.40, right=None)
+
+        assert command == FollowCommand(vx=0.0, vy=0.0, yaw_rate_deg_s=0.0, wall_visible=False)
+
+
+# ---------------------------------------------------------------------------
 # is_aligned
 # ---------------------------------------------------------------------------
 
@@ -364,7 +429,7 @@ class TestFlyToFirstObstacle:
         assert found is False
         mock_mc.stop.assert_called_once()
 
-    def test_honours_should_abort(self, mocker):
+    def test_honors_should_abort(self, mocker):
         follower = WallFollower(WallFollowConfig())
         mock_mc = mocker.MagicMock()
         mock_ranger = mocker.MagicMock()
@@ -440,7 +505,7 @@ class TestAlignToWall:
         than align_tolerance_m per align_step_deg, so a real approach can
         straddle the aligned heading without ever landing inside a narrow
         tolerance window. Detecting the sign change of (front - right)
-        between steps must still terminate alignment — follow()'s
+        between steps must still terminate alignment - follow()'s
         continuous yaw correction removes the remaining residual.
         """
         config = WallFollowConfig(align_step_deg=5.0, align_tolerance_m=0.05, max_align_deg=120.0)
@@ -459,7 +524,7 @@ class TestAlignToWall:
 
     def test_does_not_stop_on_constant_sign_that_never_flips(self, mocker):
         """The never-aligns fixture in test_gives_up_after_max_align_deg has
-        a constant, non-flipping sign (front > right throughout) — confirm
+        a constant, non-flipping sign (front > right throughout) - confirm
         the sign-flip check does not cause an early false-positive exit
         there.
         """
@@ -489,7 +554,7 @@ class TestAlignToWall:
 
 
 # ---------------------------------------------------------------------------
-# follow — the 10 Hz closed-loop control
+# follow - the 10 Hz closed-loop control
 # ---------------------------------------------------------------------------
 
 
@@ -498,7 +563,7 @@ class TestFollow:
         """The safety-critical guarantee (decision 5): should_abort() is
         re-checked immediately before every start_linear_motion() call, so
         no motion command is ever issued after should_abort() has returned
-        True — CollisionMonitor's own mc.stop() must never be overridden by
+        True - CollisionMonitor's own mc.stop() must never be overridden by
         the next control cycle.
         """
         follower = WallFollower(WallFollowConfig())
@@ -566,6 +631,68 @@ class TestFollow:
         # the wall_lost_timeout_s grace period are safe zero-velocity
         # commands (wall_visible=False -> compute_follow_command returns an
         # all-zero FollowCommand), not stale nonzero ones.
+        mock_mc.stop.assert_called_once()
+        for call in mock_mc.start_linear_motion.call_args_list:
+            assert call.args == (0.0, 0.0, 0.0)
+
+    def test_front_missing_does_not_trigger_wall_lost(self, mocker, caplog):
+        """Regression for scripts/logs/right_wall_follow.log's 08:58:12 run:
+        front permanently None (right still valid) must not be treated as
+        the wall being lost -- wall_lost_timeout_s is deliberately very
+        short here so the bug (wall-lost firing) would reproduce within a
+        couple of poll cycles if it still existed.
+        """
+        config = WallFollowConfig(follow_duration_s=100.0, wall_lost_timeout_s=0.05)
+        follower = WallFollower(config)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=None, right=0.40)
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        clock = {"t": 0.0}
+
+        def fake_monotonic() -> float:
+            clock["t"] += 0.02
+            return clock["t"]
+
+        mocker.patch("Crazyflie.flight.wall_follower.time.monotonic", side_effect=fake_monotonic)
+
+        call_count = {"n": 0}
+
+        def should_abort() -> bool:
+            call_count["n"] += 1
+            return call_count["n"] > 10
+
+        with caplog.at_level("WARNING", logger="Crazyflie.flight.wall_follower"):
+            follower.follow(mock_mc, mock_ranger, should_abort=should_abort)
+
+        assert "wall lost" not in caplog.text
+        assert mock_mc.start_linear_motion.call_count > 0
+        for call in mock_mc.start_linear_motion.call_args_list:
+            assert call.args != (0.0, 0.0, 0.0)
+
+    def test_right_missing_still_triggers_wall_lost(self, mocker):
+        """Control case: right missing must still stop the flight via
+        wall_lost_timeout_s -- the fix narrows what counts as "lost", it
+        does not weaken real wall-loss detection.
+        """
+        config = WallFollowConfig(follow_duration_s=100.0, wall_lost_timeout_s=0.05)
+        follower = WallFollower(config)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=0.40, right=None)
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        clock = {"t": 0.0}
+
+        def fake_monotonic() -> float:
+            clock["t"] += 0.02
+            return clock["t"]
+
+        mocker.patch("Crazyflie.flight.wall_follower.time.monotonic", side_effect=fake_monotonic)
+
+        follower.follow(mock_mc, mock_ranger, should_abort=None)
+
         mock_mc.stop.assert_called_once()
         for call in mock_mc.start_linear_motion.call_args_list:
             assert call.args == (0.0, 0.0, 0.0)

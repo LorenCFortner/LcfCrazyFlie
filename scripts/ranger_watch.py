@@ -39,7 +39,7 @@ def main() -> None:
     cflib.crtp.init_drivers(enable_debug_driver=False)
 
     logger.info(f"Connecting to {URI}...")
-    logger.info("Streaming sensor readings — press Ctrl+C to stop.")
+    logger.info("Streaming sensor readings - press Ctrl+C to stop.")
 
     def fmt(v: float | None) -> str:
         return f"{v:.3f}" if v is not None else " None"

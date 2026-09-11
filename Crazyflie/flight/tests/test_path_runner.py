@@ -21,7 +21,7 @@ def single_step(
 
 
 # ---------------------------------------------------------------------------
-# run() — forward execution
+# run() - forward execution
 # ---------------------------------------------------------------------------
 
 
@@ -108,7 +108,7 @@ class TestRun:
 
 
 # ---------------------------------------------------------------------------
-# run_reversed() — reversed execution with inverted directions
+# run_reversed() - reversed execution with inverted directions
 # ---------------------------------------------------------------------------
 
 
@@ -171,7 +171,7 @@ class TestRunReversed:
 
 
 # ---------------------------------------------------------------------------
-# run_out_and_back() — forward then 180° turn then return with left/right and
+# run_out_and_back() - forward then 180° turn then return with left/right and
 # turn_left/turn_right swapped (forward/back/up/down unchanged)
 # ---------------------------------------------------------------------------
 
@@ -214,7 +214,7 @@ class TestRunOutAndBack:
 
         # Outbound: forward(1.0), forward(0.5)
         # turn_right(180)
-        # Return: forward(0.5), forward(1.0)  — reversed order, forward stays forward
+        # Return: forward(0.5), forward(1.0)  - reversed order, forward stays forward
         calls = mock_mc.method_calls
         # calls: [forward(1.0), forward(0.5), turn_right(180), forward(0.5), forward(1.0)]
         assert calls[3][1][0] == pytest.approx(0.5)
@@ -326,7 +326,7 @@ class TestRunOutAndBack:
 
 
 # ---------------------------------------------------------------------------
-# should_abort — early exit when callable returns True
+# should_abort - early exit when callable returns True
 # ---------------------------------------------------------------------------
 
 

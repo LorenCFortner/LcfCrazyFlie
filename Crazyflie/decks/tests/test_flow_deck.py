@@ -1,6 +1,6 @@
 """Tests for FlowDeck and FlowDeckReadings.
 
-Written test-first (TDD). All cflib I/O is mocked — no real drone required.
+Written test-first (TDD). All cflib I/O is mocked - no real drone required.
 """
 
 import pytest

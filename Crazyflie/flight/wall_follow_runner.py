@@ -1,6 +1,6 @@
 """Right-wall-following flight runner for Crazyflie 2.0.
 
-Provides run_wall_follow_flight() — the full connection-to-landing lifecycle
+Provides run_wall_follow_flight() - the full connection-to-landing lifecycle
 for scripts/right_wall_follow.py, flying WallFollower's search/align/follow
 sequence instead of a pre-planned FlightStep path.
 
@@ -11,7 +11,7 @@ the wall-follow-specific flight body: waiting for the first Multi-ranger
 reading, then running the search -> align -> follow sequence.
 
 CollisionMonitor is the sole owner of the Multi-ranger connection for the
-whole flight (see its get_latest_readings() docstring) — WallFollower reads
+whole flight (see its get_latest_readings() docstring) - WallFollower reads
 sensor data through the _CollisionMonitorRangerAdapter below rather than
 opening a second, unsafe connection of its own.
 """
@@ -44,7 +44,7 @@ _FIRST_READING_TIMEOUT_S: float = 2.0
 # How stale a reading from CollisionMonitor's poll thread may be before this
 # adapter treats it as unreadable rather than steering from it. WallFollower
 # actively commands motion from this reading every cycle, unlike
-# CollisionMonitor's own passive detection role — a stalled poll thread (an
+# CollisionMonitor's own passive detection role - a stalled poll thread (an
 # exception inside the MultiRangerDeck context, a log config error) must
 # degrade to "no reading" rather than leave the follower flying forever on
 # one frozen snapshot. Generous relative to the 10 Hz poll rate (5 periods)
@@ -55,8 +55,8 @@ _MAX_READING_AGE_S: float = 0.5
 class _CollisionMonitorRangerAdapter:
     """Duck-typed stand-in for a MultiRangerDeck, backed by CollisionMonitor.
 
-    Exposes the only method WallFollower calls on its "ranger" argument —
-    get_readings() — by reading CollisionMonitor's shared latest-reading
+    Exposes the only method WallFollower calls on its "ranger" argument -
+    get_readings() - by reading CollisionMonitor's shared latest-reading
     snapshot instead of opening a second, unsafe Multi-ranger connection.
 
     Before CollisionMonitor's background thread has completed its first
@@ -71,7 +71,7 @@ class _CollisionMonitorRangerAdapter:
     _EMPTY_READINGS = MultiRangerReadings(front=None, back=None, left=None, right=None, up=None)
 
     def __init__(self, collision_monitor: CollisionMonitor) -> None:
-        """Initialise the adapter.
+        """Initialize the adapter.
 
         Args:
             collision_monitor: The running CollisionMonitor whose shared
@@ -123,7 +123,7 @@ def run_wall_follow_flight(
 
     Connects to the drone, checks clearance, starts safety monitors, verifies
     takeoff, flies forward to the first obstacle, aligns to 45 degrees, then
-    follows the wall with WallFollower — then lands and cleans up. Blocks
+    follows the wall with WallFollower - then lands and cleans up. Blocks
     until the drone has disconnected and the post-disconnect sleep has
     elapsed.
 
@@ -146,7 +146,7 @@ def run_wall_follow_flight(
         ranger_adapter = _CollisionMonitorRangerAdapter(ctx.collision_monitor)
 
         def _handle_abort() -> None:
-            # should_abort() just became True — a monitor may have triggered
+            # should_abort() just became True - a monitor may have triggered
             # mid-phase, but its event might not be queued yet (see
             # handle_safety_events' block_timeout_s docstring). Wait rather
             # than check once and miss it.
@@ -158,7 +158,7 @@ def run_wall_follow_flight(
             )
 
         if not _wait_for_first_ranger_reading(ctx.collision_monitor):
-            logger.error("No Multi-ranger reading received — aborting.")
+            logger.error("No Multi-ranger reading received - aborting.")
             return
 
         logger.info("Searching for the first obstacle...")
@@ -170,7 +170,7 @@ def run_wall_follow_flight(
             return
         if not found:
             logger.warning(
-                f"No obstacle found within {cfg.max_search_distance_m:.1f} m — landing."
+                f"No obstacle found within {cfg.max_search_distance_m:.1f} m - landing."
             )
             return
 
@@ -180,7 +180,7 @@ def run_wall_follow_flight(
             _handle_abort()
             return
         if not aligned:
-            logger.warning("Could not align to the wall — landing.")
+            logger.warning("Could not align to the wall - landing.")
             return
 
         logger.info("Following the wall...")
@@ -190,7 +190,7 @@ def run_wall_follow_flight(
             _handle_abort()
             return
 
-        logger.info("Wall follow complete — landing.")
+        logger.info("Wall follow complete - landing.")
 
     hooks = FlightLifecycleHooks(pre_flight_fn=pre_flight_fn, post_flight_fn=post_flight_fn)
 

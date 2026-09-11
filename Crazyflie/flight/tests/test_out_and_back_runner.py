@@ -2,7 +2,7 @@
 
 Written test-first (TDD). run_out_and_back_flight() delegates the shared
 connect/clearance/monitor/teardown lifecycle to
-Crazyflie.flight.flight_lifecycle.run_flight_lifecycle() — that machinery is
+Crazyflie.flight.flight_lifecycle.run_flight_lifecycle() - that machinery is
 covered by test_flight_lifecycle.py. These tests mock run_flight_lifecycle
 itself and inspect/invoke the flight_body_fn and FlightLifecycleHooks that
 run_out_and_back_flight() builds, so they exercise only this runner's own
@@ -48,7 +48,7 @@ def _run_and_get_body_and_hooks(mocker, **kwargs: Any) -> tuple[Any, Any]:
 
 
 # ---------------------------------------------------------------------------
-# run_flight_lifecycle wiring — uri, telemetry_file passed through unchanged.
+# run_flight_lifecycle wiring - uri, telemetry_file passed through unchanged.
 # ---------------------------------------------------------------------------
 
 
@@ -105,7 +105,7 @@ class TestAdaptiveCorrectorHook:
 
 
 # ---------------------------------------------------------------------------
-# flight_body_fn — SafeFlightController construction and run_out_and_back call
+# flight_body_fn - SafeFlightController construction and run_out_and_back call
 # ---------------------------------------------------------------------------
 
 

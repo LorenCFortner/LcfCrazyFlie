@@ -7,7 +7,7 @@ threshold. Call this before starting monitors or taking off.
 Example:
     >>> with SyncCrazyflie(URI) as scf:
     ...     if not check_preflight_clearance(scf):
-    ...         logger.error("Too close to obstacle — aborting.")
+    ...         logger.error("Too close to obstacle - aborting.")
     ...         return
 """
 
@@ -30,12 +30,12 @@ def is_clearance_sufficient(
 ) -> bool:
     """Return True if no sensor reads closer than min_clearance_m.
 
-    None and zero readings are treated as clear — None means nothing within
+    None and zero readings are treated as clear - None means nothing within
     sensor range; zero means the sensor has not yet produced a valid reading.
 
     Args:
         readings: Snapshot of all five Multi-ranger distances.
-        min_clearance_m: Minimum acceptable clearance in metres.
+        min_clearance_m: Minimum acceptable clearance in meters.
 
     Returns:
         True if all directions are clear, False if any is too close.
@@ -63,7 +63,7 @@ def check_preflight_clearance(
 
     Args:
         scf: Connected SyncCrazyflie instance.
-        min_clearance_m: Minimum safe clearance in metres. Defaults to 0.1.
+        min_clearance_m: Minimum safe clearance in meters. Defaults to 0.1.
 
     Returns:
         True if all directions have sufficient clearance, False otherwise.

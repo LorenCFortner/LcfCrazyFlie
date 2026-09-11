@@ -272,7 +272,7 @@ def test_handle_safety_events_does_not_stop_monitor_when_queue_empty(mc, stabili
 
 
 # ---------------------------------------------------------------------------
-# block_timeout_s — waits for an event instead of checking once.
+# block_timeout_s - waits for an event instead of checking once.
 #
 # Regression coverage for the race: CollisionMonitor._trigger() sets
 # is_triggered()=True before its blocking avoidance move finishes and
@@ -293,7 +293,7 @@ def test_handle_safety_events_block_timeout_returns_false_when_nothing_arrives(
 
 def test_handle_safety_events_block_timeout_picks_up_delayed_event(mocker, mc, stabilizer_monitor):
     """An event that arrives shortly after the call started must still be
-    picked up — this is what a single get_nowait() check would miss.
+    picked up - this is what a single get_nowait() check would miss.
     """
     eq: queue.Queue[str] = queue.Queue()
     mock_land = mocker.patch("Crazyflie.flight.flight_lifecycle.land_immediately")
@@ -313,10 +313,10 @@ def test_handle_safety_events_block_timeout_picks_up_delayed_event(mocker, mc, s
 
 
 def test_handle_safety_events_default_block_timeout_does_not_block(mc, stabilizer_monitor):
-    """block_timeout_s defaults to 0.0 — an empty queue returns immediately,
-    matching the original get_nowait() behaviour. The bound here is generous
+    """block_timeout_s defaults to 0.0 - an empty queue returns immediately,
+    matching the original get_nowait() behavior. The bound here is generous
     (well under any realistic blocking wait, e.g. this module's own
-    EVENT_WAIT_TIMEOUT_S of 1.5s) purely to tolerate CI/scheduler jitter —
+    EVENT_WAIT_TIMEOUT_S of 1.5s) purely to tolerate CI/scheduler jitter -
     this test is not asserting a precise timing budget, only that
     get_nowait()'s non-blocking path was actually taken.
     """
@@ -566,7 +566,7 @@ class TestFlightBodyInvocation:
 
 
 # ---------------------------------------------------------------------------
-# Exception during flight — finally block still tears everything down
+# Exception during flight - finally block still tears everything down
 # ---------------------------------------------------------------------------
 
 
@@ -594,7 +594,7 @@ class TestExceptionTeardown:
 
 
 # ---------------------------------------------------------------------------
-# FlightRecorder wiring — telemetry_file param
+# FlightRecorder wiring - telemetry_file param
 # ---------------------------------------------------------------------------
 
 
@@ -683,7 +683,7 @@ class TestTelemetryWiring:
         assert collision_kwargs.get("recorder") is None
 
     def test_recorder_start_failure_does_not_abort_the_flight(self, mocker, tmp_path):
-        """Telemetry is a diagnostic nice-to-have, not a safety feature — a
+        """Telemetry is a diagnostic nice-to-have, not a safety feature - a
         recorder.start() failure (unwritable logs dir, full disk) must not
         propagate and skip the flight's own try/finally cleanup, and the
         flight body still runs.

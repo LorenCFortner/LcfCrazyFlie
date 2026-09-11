@@ -2,11 +2,11 @@
 
 Every script wires up the same handful of lines by hand: suppress cflib's
 own debug noise, show the script's own progress messages, and write a full
-INFO+ trace to a log file — so a run's detail (flight progress, collision
+INFO+ trace to a log file - so a run's detail (flight progress, collision
 response, retrace decisions) is always available on disk. configure_run_logging()
 does all of that in one call.
 
-configure_run_logging() only adjusts handlers/levels — it never calls
+configure_run_logging() only adjusts handlers/levels - it never calls
 logging.basicConfig() itself, since only a script's own main() should do
 that (see .claude/rules/crazyflie/naming-and-structure.md). Call
 logging.basicConfig() first, then this function, both from main().
@@ -40,7 +40,7 @@ def configure_run_logging(
     """Configure console + file logging for a script's main().
 
     Must be called after logging.basicConfig() (this function does not call
-    it) — console_level is applied to the console handler basicConfig()
+    it) - console_level is applied to the console handler basicConfig()
     adds, assumed to be the first handler on the root logger.
 
     Console output is capped at console_level (default INFO). A full trace

@@ -2,7 +2,7 @@
 
 Written test-first (TDD). configure_run_logging() mutates global logging
 state (the real root logger, plus its own module-level handler-tracking
-variable), so every logging.* call it makes is mocked here — tests assert
+variable), so every logging.* call it makes is mocked here - tests assert
 on the calls made, not on real logger/handler side effects, keeping the
 suite hermetic and avoiding cross-test pollution. reset_active_file_handler
 resets the module's own tracked-handler state around every test for the
@@ -33,7 +33,7 @@ def mock_logging(mocker) -> dict[str, object]:
     Returns a dict with the mocked root logger, console handler, the
     logging.getLogger patch (keyed by logger name), logging.basicConfig,
     the logging.FileHandler class patch, and the list of FileHandler mock
-    instances created (in call order) — one per configure_run_logging call.
+    instances created (in call order) - one per configure_run_logging call.
     """
     mock_basic_config = mocker.patch("Crazyflie.observability.run_logging.logging.basicConfig")
 
@@ -76,7 +76,7 @@ def mock_logging(mocker) -> dict[str, object]:
 
 
 def test_does_not_call_basic_config(mock_logging, tmp_path):
-    """configure_run_logging must not call basicConfig — only a script's
+    """configure_run_logging must not call basicConfig - only a script's
     own main() may (see .claude/rules/crazyflie/naming-and-structure.md).
     """
     configure_run_logging("my.script", tmp_path / "logs" / "run.log")
@@ -138,7 +138,7 @@ def test_sets_file_handler_formatter(mock_logging, tmp_path):
 def test_file_handler_attached_to_root_logger(mock_logging, tmp_path):
     # Patching logging.getLogger reaches the real shared `logging` module, so
     # unrelated infrastructure (e.g. pytest's own log capture) may also call
-    # addHandler on this mock during the test — assert_any_call tolerates that.
+    # addHandler on this mock during the test - assert_any_call tolerates that.
     configure_run_logging("my.script", tmp_path / "logs" / "run.log")
 
     file_handler = mock_logging["created_file_handlers"][0]
@@ -164,7 +164,7 @@ def test_sets_crazyflie_package_logger_to_file_level(mock_logging, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Repeat calls in the same process — the previous FileHandler must be
+# Repeat calls in the same process - the previous FileHandler must be
 # closed and detached, not left accumulating.
 # ---------------------------------------------------------------------------
 
@@ -172,7 +172,7 @@ def test_sets_crazyflie_package_logger_to_file_level(mock_logging, tmp_path):
 def test_first_call_has_no_previous_handler_to_remove(mock_logging, tmp_path):
     # Patching logging.getLogger reaches the real shared `logging` module, so
     # unrelated infrastructure (e.g. pytest's own log capture) may also call
-    # removeHandler during the test — assert only that none of our own
+    # removeHandler during the test - assert only that none of our own
     # FileHandler mocks (there are none yet) were ever passed to it.
     configure_run_logging("my.script", tmp_path / "logs" / "run.log")
 

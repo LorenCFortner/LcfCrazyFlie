@@ -7,28 +7,28 @@ A shared FlightState is passed to both SafeFlightController and
 CollisionMonitor so the detection threshold scales automatically with the
 velocity of each flight step.
 
-Forward-leg velocity is 0.25 m/s (reduced from 0.5 m/s — flies roughly twice
+Forward-leg velocity is 0.25 m/s (reduced from 0.5 m/s - flies roughly twice
 as slowly as before). CollisionMonitor's side-sensor threshold is now
-additive with velocity (SIDE_CLEARANCE_M + velocity * REACTION_S — see
+additive with velocity (SIDE_CLEARANCE_M + velocity * REACTION_S - see
 Crazyflie.safety.collision_monitor), so at 0.5 m/s any doorway, corridor
 wall, or piece of furniture within ~0.43 m would trigger a COLLISION that
 this route previously flew past cleanly. 0.25 m/s keeps that threshold at a
 more forgiving ~0.26 m. Re-fly and observe this route before trusting it at
 the new speed.
 
-Route (outbound leg — run_out_and_back retraces in reverse to return home):
+Route (outbound leg - run_out_and_back retraces in reverse to return home):
   forward 1.6 m → left 1.7 m → forward 6.0 m →
   left 0.3 m   → forward 0.3 m → left 0.3 m
 
 Pre-flight:
-  1. Clearance check — aborts if any direction is within 0.1 m.
+  1. Clearance check - aborts if any direction is within 0.1 m.
   2. LED headlights on.
 
 Post-flight: LED ring off.
 
 Safety events handled: CRASH, BATLOW, COLLISION.
 On COLLISION: retraces whatever has actually been flown so far (see
-Crazyflie.flight.collision_return) rather than assuming a straight line —
+Crazyflie.flight.collision_return) rather than assuming a straight line -
 this route has five turns, so a straight fly-back would not work. If a
 second collision interrupts the retrace, the drone backs away from the new
 obstacle for clearance and lands instead of continuing home.
@@ -80,7 +80,7 @@ def _on_collision(
     Args:
         mc: Active MotionCommander instance.
         context: Flight progress snapshot from the collision.
-        should_abort: Re-armed CollisionMonitor.is_triggered — detects a
+        should_abort: Re-armed CollisionMonitor.is_triggered - detects a
             second collision during the retrace.
         flight_state: Shared FlightState so the retrace keeps the collision
             monitor's directional detection threshold accurate.
@@ -95,8 +95,8 @@ def _on_collision(
 def main() -> None:
     """Main entry point for the safe flight-around-the-house script.
 
-    A full INFO+ trace of the run — including retrace/collision-response
-    detail — is written to _LOG_FILE (overwritten each run) as well as the
+    A full INFO+ trace of the run - including retrace/collision-response
+    detail - is written to _LOG_FILE (overwritten each run) as well as the
     console.
     """
     logging.basicConfig(level=logging.ERROR)

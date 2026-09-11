@@ -1,14 +1,14 @@
 """Continuous flight telemetry recorder for Crazyflie 2.0.
 
 Writes every sensor reading CollisionMonitor and StabilizerMonitor already
-take to one CSV — not just the WARNING-level events that make it into the
-text run log — so a flight can be reconstructed from data afterward instead
+take to one CSV - not just the WARNING-level events that make it into the
+text run log - so a flight can be reconstructed from data afterward instead
 of guessed at from sparse event logs.
 
 Fed by both monitors on every reading they already take; does not open its
 own connection to any deck. A second, independent connection to the
 Multi-ranger deck alongside CollisionMonitor's is not safe (duplicate log
-configs, limited radio log bandwidth) — see Crazyflie.decks.multi_ranger.
+configs, limited radio log bandwidth) - see Crazyflie.decks.multi_ranger.
 
 Example:
     >>> recorder = FlightRecorder()
@@ -54,7 +54,7 @@ class FlightRecorder:
 
     Each call to record_ranger() / record_stabilizer() appends one row.
     Both monitors run on separate background threads, so writes are
-    serialized with an internal lock. Every row is flushed immediately —
+    serialized with an internal lock. Every row is flushed immediately -
     this recorder exists specifically to diagnose crashes, so a hard
     failure must not lose the buffered tail of data.
 

@@ -18,7 +18,7 @@ def _readings(front=None, back=None, left=None, right=None, up=None) -> MultiRan
 
 
 # ---------------------------------------------------------------------------
-# is_clearance_sufficient — pure function tests
+# is_clearance_sufficient - pure function tests
 # ---------------------------------------------------------------------------
 
 
@@ -73,7 +73,7 @@ class TestIsClearanceSufficient:
 
 
 # ---------------------------------------------------------------------------
-# check_preflight_clearance — integration (mocked hardware)
+# check_preflight_clearance - integration (mocked hardware)
 # ---------------------------------------------------------------------------
 
 
@@ -138,7 +138,7 @@ class TestCheckPreflightClearance:
     def test_uses_default_min_clearance(self, patched_clearance, mocker):
         scf, ranger = patched_clearance
         check_preflight_clearance(scf)
-        # default threshold — a reading just above it should still pass
+        # default threshold - a reading just above it should still pass
         ranger.get_readings.return_value = _readings(
             front=MIN_PREFLIGHT_CLEARANCE_M + 0.01,
             back=1.0,
@@ -150,7 +150,7 @@ class TestCheckPreflightClearance:
 
     def test_custom_threshold_passed_through(self, patched_clearance):
         scf, ranger = patched_clearance
-        # 0.5 m front obstacle — clear at 0.3 default, blocked at 0.6
+        # 0.5 m front obstacle - clear at 0.3 default, blocked at 0.6
         ranger.get_readings.return_value = _readings(
             front=0.5, back=1.0, left=1.0, right=1.0, up=1.0
         )

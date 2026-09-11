@@ -1,7 +1,7 @@
 """Tests for FlightRecorder.
 
 Written test-first (TDD). Uses real file I/O against tmp_path since the
-actual CSV output format is the point of this module — mocking the file
+actual CSV output format is the point of this module - mocking the file
 handle would hide exactly the kind of format bug this recorder exists to
 catch (e.g. a wrong-order column, a missed field).
 """
@@ -148,7 +148,7 @@ class TestStop:
 
     def test_record_after_stop_is_a_silent_no_op(self, tmp_path):
         """Writes after stop() (or before start()) are silently dropped
-        rather than raising — a recorder in an unusable state must never
+        rather than raising - a recorder in an unusable state must never
         crash a flight.
         """
         csv_path = tmp_path / "run_telemetry.csv"

@@ -30,11 +30,11 @@ class HeightGuard:
         max_height_m: float = 0.7,
         initial_height_m: float = 0.3,
     ) -> None:
-        """Initialise the guard.
+        """Initialize the guard.
 
         Args:
-            min_height_m: Lowest permitted altitude in metres.
-            max_height_m: Highest permitted altitude in metres.
+            min_height_m: Lowest permitted altitude in meters.
+            max_height_m: Highest permitted altitude in meters.
             initial_height_m: Starting height (typically MotionCommander's default
                 take-off height of 0.3 m).
         """
@@ -44,7 +44,7 @@ class HeightGuard:
 
     @property
     def current_height_m(self) -> float:
-        """Current tracked drone height in metres."""
+        """Current tracked drone height in meters."""
         return self._current
 
     def clamp(self, step: FlightStep) -> Optional[FlightStep]:

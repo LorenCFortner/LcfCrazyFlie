@@ -7,8 +7,8 @@ Runs a background thread using SyncLogger to continuously stream:
   - pm.state                       (0=nominal, non-zero=charging/low)
 
 Posts queue messages on abnormal states so flight scripts can react:
-  "BATLOW"  — battery voltage dropped below threshold
-  "CRASH"   — roll or pitch exceeded safety spec
+  "BATLOW"  - battery voltage dropped below threshold
+  "CRASH"   - roll or pitch exceeded safety spec
 
 The safety check functions (check_battery, check_roll, check_pitch) and
 the log parser (update_state_from_log) are module-level so they can be
@@ -45,7 +45,7 @@ class DroneState:
 
 
 # ---------------------------------------------------------------------------
-# Pure safety check functions — testable without a drone or threads
+# Pure safety check functions - testable without a drone or threads
 # ---------------------------------------------------------------------------
 
 
@@ -131,7 +131,7 @@ def check_pitch(
 
 
 # ---------------------------------------------------------------------------
-# Monitor class — owns the background thread
+# Monitor class - owns the background thread
 # ---------------------------------------------------------------------------
 
 

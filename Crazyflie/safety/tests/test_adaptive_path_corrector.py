@@ -18,8 +18,8 @@ from Crazyflie.safety.collision_monitor import _REACTION_S, _SIDE_CLEARANCE_M
 
 # Matches mock_flight_state's default get_velocity() below. Zone bounds are
 # velocity-scaled (see adaptive_path_corrector's module docstring), so tests
-# need a fixed velocity to compute a value guaranteed to land inside — or
-# outside — the zone.
+# need a fixed velocity to compute a value guaranteed to land inside - or
+# outside - the zone.
 _VELOCITY = 0.3
 _ZONE_LOWER = _SIDE_CLEARANCE_M + _VELOCITY * _REACTION_S
 _ZONE_UPPER = _ZONE_LOWER + ADAPTIVE_BAND_WIDTH_M
@@ -48,7 +48,7 @@ def corrector(mock_scf, mock_flight_state):
 
 
 # ---------------------------------------------------------------------------
-# _check() — detection logic (no background thread)
+# _check() - detection logic (no background thread)
 # ---------------------------------------------------------------------------
 
 
@@ -66,13 +66,13 @@ class TestNeedsCorrection:
         assert corrector.needs_correction()
 
     def test_false_when_leading_sensor_is_close(self, corrector, mock_flight_state):
-        """Front sensor close while flying forward — that is collision's job."""
+        """Front sensor close while flying forward - that is collision's job."""
         mock_flight_state.get_direction.return_value = "forward"
         corrector._check(_readings(front=0.12))
         assert not corrector.needs_correction()
 
     def test_false_when_direction_is_none(self, corrector, mock_flight_state):
-        """No direction (hover/turn) — adaptive check is skipped entirely."""
+        """No direction (hover/turn) - adaptive check is skipped entirely."""
         mock_flight_state.get_direction.return_value = None
         in_zone = (_ZONE_LOWER + _ZONE_UPPER) / 2.0
         corrector._check(_readings(left=in_zone))
@@ -94,7 +94,7 @@ class TestNeedsCorrection:
 
     def test_zone_scales_with_velocity(self, corrector, mock_flight_state):
         """A value inside the flat (0.10, 0.15) m zone no longer triggers at
-        a realistic flight velocity — this is the regression this task
+        a realistic flight velocity - this is the regression this task
         exists to fix: the old fixed zone sat entirely below the velocity-
         scaled collision threshold at any speed above ~0.077 m/s.
         """
@@ -118,7 +118,7 @@ class TestNeedsCorrection:
 
 
 # ---------------------------------------------------------------------------
-# get_correction() — correction command selection
+# get_correction() - correction command selection
 # ---------------------------------------------------------------------------
 
 

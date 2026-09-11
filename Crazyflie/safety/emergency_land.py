@@ -2,8 +2,8 @@
 
 Called when a safety limit is exceeded. Two modes:
 
-  land_immediately   — rapid stepwise descent for crash/out-of-spec events
-  land_on_low_battery — gentle land() for low battery (drone is still stable)
+  land_immediately   - rapid stepwise descent for crash/out-of-spec events
+  land_on_low_battery - gentle land() for low battery (drone is still stable)
 """
 
 import time
@@ -18,8 +18,8 @@ _EMERGENCY_STEP_PAUSE_S = 0.2
 def land_immediately(mc: MotionCommander) -> None:
     """Perform a rapid stepwise descent for emergency landing.
 
-    Descends in small increments so the stabiliser keeps control.
-    MotionCommander finalises the landing when its context exits.
+    Descends in small increments so the stabilizer keeps control.
+    MotionCommander finalizes the landing when its context exits.
 
     Args:
         mc: Active MotionCommander instance.
@@ -33,7 +33,7 @@ def land_on_low_battery(mc: MotionCommander) -> None:
     """Land gently when battery is low.
 
     Stops horizontal movement first, then uses MotionCommander.land()
-    because the drone is still stable — only the battery is the concern.
+    because the drone is still stable - only the battery is the concern.
 
     Args:
         mc: Active MotionCommander instance.

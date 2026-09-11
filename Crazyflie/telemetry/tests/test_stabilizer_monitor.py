@@ -19,7 +19,7 @@ from Crazyflie.telemetry.stabilizer_monitor import (
 )
 
 # ---------------------------------------------------------------------------
-# DroneState — update from raw log data
+# DroneState - update from raw log data
 # ---------------------------------------------------------------------------
 
 
@@ -464,6 +464,6 @@ class TestWaitForFirstReading:
 
     def test_returns_false_when_timeout_expires(self, mock_scf, mock_queue):
         monitor = StabilizerMonitor(mock_scf, mock_queue)
-        # Event never set — should time out immediately
+        # Event never set - should time out immediately
 
         assert monitor.wait_for_first_reading(timeout_s=0.01) is False

@@ -11,7 +11,7 @@ call to return.
 When a FlightState is provided, the current velocity is written to it before
 each linear movement step so CollisionMonitor can compute a velocity-appropriate
 detection threshold. On a turn (including the 180° pivot in run_out_and_back),
-direction is set to None and velocity is set to 0.0 — the pivot's own rate is
+direction is set to None and velocity is set to 0.0 - the pivot's own rate is
 in deg/s, not m/s, so it is never written as a linear velocity, but a
 stationary pivot also has no linear stopping distance to protect, so the
 FlightState must not keep carrying whatever the previous linear step's
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_POLL_S: float = 0.10  # 10 Hz abort polling — matches Multi-ranger sensor refresh rate
+_POLL_S: float = 0.10  # 10 Hz abort polling - matches Multi-ranger sensor refresh rate
 
 # After a 180° pivot the drone's heading is reversed, so forward/back and
 # up/down already map correctly. Only lateral and rotational commands need
@@ -142,7 +142,7 @@ class SafeFlightController:
         Completed steps are logged in full (their planned command and
         distance_m). A step interrupted by should_abort is logged with the
         partial magnitude actually covered instead of the planned distance_m
-        — metres for linear moves, degrees for turns — and is omitted
+        - meters for linear moves, degrees for turns - and is omitted
         entirely if the abort fired before any movement occurred.
 
         Reversing this list and inverting each command (see
@@ -157,7 +157,7 @@ class SafeFlightController:
 
         Args:
             executed_step: The step as actually commanded (command already
-                resolved — e.g. inverted for a return leg), with the full
+                resolved - e.g. inverted for a return leg), with the full
                 planned distance_m/velocity/settle_s.
             aborted: Whether should_abort fired mid-move. When True, only
                 self._last_partial_magnitude (set by the preceding _execute
@@ -252,7 +252,7 @@ class SafeFlightController:
         if should_abort and should_abort():
             return
 
-        # 180° interruptible pivot to face home — sets direction=None on FlightState
+        # 180° interruptible pivot to face home - sets direction=None on FlightState
         # (pivot velocity is deg/s, not m/s, so velocity is not updated)
         aborted = self._execute(
             mc,
@@ -268,7 +268,7 @@ class SafeFlightController:
         if aborted:
             return
 
-        # Return leg — reversed order, lateral/rotational commands swapped
+        # Return leg - reversed order, lateral/rotational commands swapped
         for step in reversed(self._steps):
             if should_abort and should_abort():
                 return
@@ -349,7 +349,7 @@ class SafeFlightController:
         Args:
             mc: Active MotionCommander instance.
             command: Movement command name ('forward', 'turn_left', etc.).
-            distance_m: Distance in metres (or degrees for turns).
+            distance_m: Distance in meters (or degrees for turns).
             velocity: Speed in m/s (or deg/s for turns).
             should_abort: Callable returning True to abort mid-move.
             adaptive_corrector: Optional corrector supplying mid-step corrections.
@@ -370,7 +370,7 @@ class SafeFlightController:
 
         if not is_turn and velocity > MAX_SAFE_VELOCITY_M_S:
             logger.error(
-                "Step velocity %.3f m/s exceeds MAX_SAFE_VELOCITY_M_S (%.3f m/s) — aborting",
+                "Step velocity %.3f m/s exceeds MAX_SAFE_VELOCITY_M_S (%.3f m/s) - aborting",
                 velocity,
                 MAX_SAFE_VELOCITY_M_S,
             )
@@ -383,7 +383,7 @@ class SafeFlightController:
             if is_turn:
                 self._state.set_direction(None)
                 # A pivot has no linear travel to stop, so there is no
-                # stopping-distance margin to reserve — velocity must read
+                # stopping-distance margin to reserve - velocity must read
                 # 0.0, not the previous linear step's value. Left non-zero,
                 # CollisionMonitor's velocity-scaled side threshold would
                 # treat a stationary rotation as if it were still

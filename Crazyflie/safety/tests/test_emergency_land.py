@@ -27,7 +27,7 @@ class TestLandImmediately:
 
         assert mock_sleep.call_count >= 3
 
-    def test_total_descent_is_at_least_half_metre(self, mock_mc):
+    def test_total_descent_is_at_least_half_meter(self, mock_mc):
         land_immediately(mock_mc)
 
         total_descent = sum(c[0][0] for c in mock_mc.down.call_args_list)

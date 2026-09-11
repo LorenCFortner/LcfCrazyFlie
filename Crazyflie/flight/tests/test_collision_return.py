@@ -168,7 +168,7 @@ class TestFlyHomeAfterCollision:
 
     def test_second_collision_backs_up_for_clearance(self, mock_mc, mocker):
         """should_abort returning True after the retrace means a second
-        collision interrupted the return leg — back up and stop.
+        collision interrupted the return leg - back up and stop.
         """
         log = [FlightStep("forward", 1.0, 0.5, 0.0)]
         context = CollisionContext(flight_log=log)

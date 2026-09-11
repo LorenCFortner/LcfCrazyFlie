@@ -2,7 +2,7 @@
 
 Simple hover test to verify stable flight and check battery health.
 
-Pre-flight:  headlights on, effect 7 (solid colour), dim brightness.
+Pre-flight:  headlights on, effect 7 (solid color), dim brightness.
 Post-flight: LED ring off.
 """
 
@@ -76,16 +76,16 @@ def handle_safety_events(
     monitor.stop()
 
     if event == "CRASH":
-        logger.warning("CRASH detected — emergency landing.")
+        logger.warning("CRASH detected - emergency landing.")
         land_immediately(mc)
     elif event == "BATLOW":
-        logger.warning("Low battery — landing now.")
+        logger.warning("Low battery - landing now.")
         land_on_low_battery(mc)
     elif event == "COLLISION":
-        logger.warning("Obstacle detected — avoidance complete, landing now.")
+        logger.warning("Obstacle detected - avoidance complete, landing now.")
         land_immediately(mc)
     else:
-        logger.warning(f"Unknown event '{event}' — landing immediately as precaution.")
+        logger.warning(f"Unknown event '{event}' - landing immediately as precaution.")
         land_immediately(mc)
 
     return True
@@ -131,7 +131,7 @@ def main() -> None:
         try:
             with MotionCommander(scf) as mc:
                 collision_monitor.attach_motion_commander(mc)
-                logger.info("Airborne — stabilizing for 3 seconds...")
+                logger.info("Airborne - stabilizing for 3 seconds...")
                 for i in range(3):
                     time.sleep(1.0)
                     height_cm = stabilizer_monitor.state.height_mm / 10.0
@@ -169,7 +169,7 @@ def main() -> None:
 
                     time.sleep(0.1)
 
-                logger.info("Hover complete — landing.")
+                logger.info("Hover complete - landing.")
 
         except Exception as exc:
             logger.error(f"Flight error: {exc}")

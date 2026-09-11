@@ -1,10 +1,10 @@
 """Step-aware collision return for Crazyflie 2.0.
 
-Generalises the "fly back home after a collision" response from a single
+Generalizes the "fly back home after a collision" response from a single
 straight leg to any multi-step path (with turns) by retracing whatever was
 actually flown, rather than assuming a straight outbound line.
 
-SafeFlightController.flight_log records the steps actually executed so far —
+SafeFlightController.flight_log records the steps actually executed so far -
 including a partial entry for whichever step a collision interrupted, and
 regardless of whether the interruption happened on the outbound leg, the
 180° pivot, or an already-inverted return leg. Reversing that log and
@@ -13,7 +13,7 @@ inverting each command yields a path back to the start point.
 The return leg is flown through SafeFlightController itself (not blocking
 MotionCommander calls) so it stays interruptible: a second collision during
 the retrace aborts it early. When that happens the response is not to keep
-retracing — it is to back away from the new obstacle for clearance and stop,
+retracing - it is to back away from the new obstacle for clearance and stop,
 leaving the drone to land wherever MotionCommander's context exit lands it.
 
 Example:
@@ -53,9 +53,9 @@ class CollisionContext:
 
     Attributes:
         flight_log: Steps actually flown so far, in order, as returned by
-            SafeFlightController.flight_log — including a final partial step
+            SafeFlightController.flight_log - including a final partial step
             for the move the collision interrupted. Turn steps use degrees
-            for distance_m; linear steps use metres.
+            for distance_m; linear steps use meters.
     """
 
     flight_log: list[FlightStep]
@@ -138,7 +138,7 @@ def fly_home_after_collision(
     """
     return_steps = build_return_path(context.flight_log)
     if not return_steps:
-        logger.warning("No flight log recorded before the collision — nothing to retrace.")
+        logger.warning("No flight log recorded before the collision - nothing to retrace.")
         return
 
     logger.warning(f"Collision: retracing {len(return_steps)} step(s) home.")
@@ -149,8 +149,8 @@ def fly_home_after_collision(
 
     if should_abort():
         logger.warning(
-            "Second collision during return leg — backing away for clearance and stopping."
+            "Second collision during return leg - backing away for clearance and stopping."
         )
         mc.back(_SECOND_COLLISION_BACKUP_M, velocity=_SECOND_COLLISION_BACKUP_VELOCITY_M_S)
     else:
-        logger.info("Retrace complete — back at start point.")
+        logger.info("Retrace complete - back at start point.")

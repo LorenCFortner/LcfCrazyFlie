@@ -36,7 +36,7 @@ def always_abort() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# run() — forward execution
+# run() - forward execution
 # ---------------------------------------------------------------------------
 
 
@@ -132,7 +132,7 @@ class TestRun:
 
 
 # ---------------------------------------------------------------------------
-# Abort behavior — mid-move and mid-settle
+# Abort behavior - mid-move and mid-settle
 # ---------------------------------------------------------------------------
 
 
@@ -144,7 +144,7 @@ class TestAbortMidMove:
         mock_mc.start_forward.assert_not_called()
 
     def test_abort_mid_move_calls_stop_immediately(self, mock_mc, mocker):
-        """Abort fires inside the polling loop — stop() must be called."""
+        """Abort fires inside the polling loop - stop() must be called."""
         calls = []
         mock_mc.start_forward.side_effect = lambda v: calls.append("start")
         mock_mc.stop.side_effect = lambda: calls.append("stop")
@@ -320,7 +320,7 @@ class TestRunOutAndBack:
         assert len(turn_calls) == 0
 
     def test_pivot_is_interruptible(self, mock_mc):
-        """Abort fires during the 180° pivot — return leg must be skipped."""
+        """Abort fires during the 180° pivot - return leg must be skipped."""
         pivot_started = [False]
 
         def abort_during_pivot():
@@ -337,7 +337,7 @@ class TestRunOutAndBack:
 
         # Return leg forward should not have been called
         forward_calls = [c for c in mock_mc.method_calls if c[0] == "start_forward"]
-        # Only one start_forward (outbound) — return leg was aborted
+        # Only one start_forward (outbound) - return leg was aborted
         assert len(forward_calls) == 1
 
     def test_empty_path_only_does_pivot(self, mock_mc):
@@ -396,7 +396,7 @@ class TestRunReversed:
 
 
 # ---------------------------------------------------------------------------
-# FlightState — velocity written before each step
+# FlightState - velocity written before each step
 # ---------------------------------------------------------------------------
 
 
@@ -433,7 +433,7 @@ class TestFlightStateVelocityPropagation:
         assert spy.call_args_list[1].args[0] == pytest.approx(0.5)
 
     def test_flight_state_velocity_zeroed_during_pivot(self, mock_mc, mocker):
-        """The pivot writes velocity 0.0 — it has no linear travel to stop,
+        """The pivot writes velocity 0.0 - it has no linear travel to stop,
         and a stale nonzero velocity would make CollisionMonitor's
         velocity-scaled side threshold misjudge a stationary rotation as
         still translating.
@@ -465,7 +465,7 @@ class TestFlightStateVelocityPropagation:
 
 
 # ---------------------------------------------------------------------------
-# FlightState — direction written before each step
+# FlightState - direction written before each step
 # ---------------------------------------------------------------------------
 
 
@@ -526,7 +526,7 @@ class TestFlightStateDirectionPropagation:
     @pytest.mark.parametrize("command", ["turn_left", "turn_right"])
     def test_turn_zeroes_velocity_on_flight_state(self, mock_mc, mocker, command):
         """A standalone turn step (not just the run_out_and_back pivot) must
-        also zero velocity — the deg/s turn rate is never written as a
+        also zero velocity - the deg/s turn rate is never written as a
         linear velocity, and the previous linear step's velocity must not
         be left stale on FlightState.
         """
@@ -637,7 +637,7 @@ class TestMaxVelocityEnforcement:
         mock_mc.start_forward.assert_called_once()
 
     def test_max_velocity_not_applied_to_turns(self, mock_mc):
-        # Turn velocity is in deg/s — the m/s cap must not apply
+        # Turn velocity is in deg/s - the m/s cap must not apply
         controller = SafeFlightController(
             [FlightStep("turn_right", 90.0, velocity=90.0, settle_s=0.0)]
         )
@@ -662,7 +662,7 @@ class TestMaxVelocityEnforcement:
 
 
 # ---------------------------------------------------------------------------
-# distance_traveled_m — tracks linear distance flown before abort or completion
+# distance_traveled_m - tracks linear distance flown before abort or completion
 # ---------------------------------------------------------------------------
 
 
@@ -729,7 +729,7 @@ class TestDistanceTraveled:
 
 
 # ---------------------------------------------------------------------------
-# flight_log — records steps actually flown, for collision retrace
+# flight_log - records steps actually flown, for collision retrace
 # ---------------------------------------------------------------------------
 
 

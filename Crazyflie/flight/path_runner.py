@@ -45,9 +45,9 @@ class FlightStep:
     Attributes:
         command: MotionCommander method name ('forward', 'back', 'left',
                  'right', 'up', 'down', 'turn_left', 'turn_right').
-        distance_m: Distance in metres (or degrees for turns).
+        distance_m: Distance in meters (or degrees for turns).
         velocity: Movement velocity in m/s. Defaults to 0.5.
-        settle_s: Pause after the move to let the drone stabilise.
+        settle_s: Pause after the move to let the drone stabilize.
     """
 
     command: str
@@ -122,7 +122,7 @@ class PathRunner:
         # 180° pivot to face home
         mc.turn_right(180, rate=_PIVOT_RATE_DEG_PER_S)
 
-        # Return leg — reversed order, lateral/rotational commands swapped
+        # Return leg - reversed order, lateral/rotational commands swapped
         for step in reversed(self._steps):
             if should_abort and should_abort():
                 return

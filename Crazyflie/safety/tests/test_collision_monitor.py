@@ -158,7 +158,7 @@ class TestMotionCommanderStop:
         monitor, mock_ranger, _ = monitor_with_ranger
         mock_ranger.get_readings.return_value = _readings()
 
-        monitor._trigger(mock_ranger)  # no mc attached — should not raise
+        monitor._trigger(mock_ranger)  # no mc attached - should not raise
 
     def test_does_not_call_stop_after_detach(self, monitor_with_ranger, mocker):
         monitor, mock_ranger, _ = monitor_with_ranger
@@ -223,7 +223,7 @@ class TestAvoidanceMove:
 
 
 class TestGetLatestReadings:
-    """CollisionMonitor.get_latest_readings — shared-connection access for
+    """CollisionMonitor.get_latest_readings - shared-connection access for
     other components (e.g. WallFollower) that need live sensor data without
     opening a second Multi-ranger connection.
     """
@@ -268,7 +268,7 @@ class TestGetLatestReadings:
         assert seen == readings_sequence
 
     def test_max_age_s_none_returns_reading_regardless_of_age(self, monitor_with_ranger, mocker):
-        """Default (no max_age_s) preserves existing callers' behaviour —
+        """Default (no max_age_s) preserves existing callers' behavior -
         the reading is returned however old it is.
         """
         monitor, mock_ranger, _ = monitor_with_ranger
@@ -494,7 +494,7 @@ class TestRun:
 
 
 # ---------------------------------------------------------------------------
-# Velocity-dependent threshold — _compute_threshold
+# Velocity-dependent threshold - _compute_threshold
 # ---------------------------------------------------------------------------
 
 
@@ -523,7 +523,7 @@ class TestComputeThreshold:
 
 
 # ---------------------------------------------------------------------------
-# _effective_side_threshold — additive, not max(), velocity-scaled side
+# _effective_side_threshold - additive, not max(), velocity-scaled side
 # threshold for non-leading sensors.
 # ---------------------------------------------------------------------------
 
@@ -541,7 +541,7 @@ class TestEffectiveSideThreshold:
     @pytest.mark.parametrize("velocity", [0.05, 0.10, 0.15, 0.30, 0.50, 0.83])
     def test_matches_additive_formula_and_exceeds_floor(self, mock_scf, event_queue, velocity):
         # Would equal exactly _SIDE_CLEARANCE_M for velocity < ~0.154 under
-        # the rejected max(_SIDE_CLEARANCE_M, velocity * _REACTION_S) form —
+        # the rejected max(_SIDE_CLEARANCE_M, velocity * _REACTION_S) form -
         # asserting "strictly greater" is what would fail against that form.
         monitor = CollisionMonitor(mock_scf, event_queue, flight_state=FlightState(velocity))
 
@@ -557,7 +557,7 @@ class TestEffectiveSideThreshold:
 
     def test_does_not_use_compute_threshold_floor(self, mock_scf, event_queue):
         """_compute_threshold's 0.25 m floor must not leak into the side
-        threshold — that would make a stationary drone trigger on its own
+        threshold - that would make a stationary drone trigger on its own
         resting surroundings. At velocity 0.05 (below the 0.25 floor's
         crossover), the side threshold must be far below 0.25 m.
         """
@@ -570,7 +570,7 @@ class TestEffectiveSideThreshold:
 
 
 # ---------------------------------------------------------------------------
-# Dynamic avoidance — distance and velocity scale with FlightState velocity
+# Dynamic avoidance - distance and velocity scale with FlightState velocity
 # ---------------------------------------------------------------------------
 
 
@@ -653,7 +653,7 @@ class TestDynamicAvoidance:
 
 
 # ---------------------------------------------------------------------------
-# FlightState integration — threshold passed to ranger each poll cycle
+# FlightState integration - threshold passed to ranger each poll cycle
 # ---------------------------------------------------------------------------
 
 
@@ -721,7 +721,7 @@ class TestFlightStateDynamicThreshold:
 
 
 # ---------------------------------------------------------------------------
-# Directional find_avoidance_move — per-sensor threshold logic
+# Directional find_avoidance_move - per-sensor threshold logic
 # ---------------------------------------------------------------------------
 
 
@@ -869,7 +869,7 @@ class TestRunOnceDirectionalThreshold:
         under the old flat 0.10 m floor (0.15 m) must now trigger while
         translating at 0.5 m/s, because 0.15 m no longer leaves room to stop
         before the blades reach a laterally-closing wall (e.g. a narrowing
-        corridor) — the motivating scenario for CollisionMonitor learning a
+        corridor) - the motivating scenario for CollisionMonitor learning a
         velocity-scaled side threshold at all.
         """
         readings = MultiRangerReadings(front=None, back=None, left=0.15, right=None, up=None)
@@ -908,7 +908,7 @@ class TestRunOnceDirectionalThreshold:
         assert monitor.is_triggered() is False
 
     def test_none_direction_all_sensors_use_side_clearance(self, mock_scf, event_queue, mocker):
-        # Hovering (direction=None, velocity=0.0 — the only combination that
+        # Hovering (direction=None, velocity=0.0 - the only combination that
         # occurs in real flight since SafeFlightController now zeroes
         # velocity whenever it clears direction on a turn/pivot); side
         # threshold collapses to exactly _SIDE_CLEARANCE_M=0.10 at rest.
@@ -938,7 +938,7 @@ class TestRunOnceDirectionalThreshold:
 
 
 # ---------------------------------------------------------------------------
-# _warn_detected — per-sensor 1.5× warning threshold logic
+# _warn_detected - per-sensor 1.5× warning threshold logic
 # ---------------------------------------------------------------------------
 
 
@@ -998,7 +998,7 @@ class TestWarnDetected:
 
 
 # ---------------------------------------------------------------------------
-# _diagonal_distance — module-level helper
+# _diagonal_distance - module-level helper
 # ---------------------------------------------------------------------------
 
 
@@ -1053,7 +1053,7 @@ class TestDiagonalDistance:
 
 
 # ---------------------------------------------------------------------------
-# _diagonal_detected — directional Pythagorean check
+# _diagonal_detected - directional Pythagorean check
 # ---------------------------------------------------------------------------
 
 
@@ -1094,13 +1094,13 @@ class TestDiagonalDetected:
         assert monitor._diagonal_detected(readings) is False
 
     def test_returns_false_for_up_direction(self, mock_scf, event_queue):
-        # "up" has no diagonal pairs — blades are horizontal
+        # "up" has no diagonal pairs - blades are horizontal
         monitor = self._make_monitor(mock_scf, event_queue, 0.83, "up")
         readings = _readings(front=0.05, back=0.05, left=0.05, right=0.05, up=0.55)
         assert monitor._diagonal_detected(readings) is False
 
     def test_returns_false_for_none_direction(self, mock_scf, event_queue):
-        # No active direction — no diagonal check
+        # No active direction - no diagonal check
         monitor = self._make_monitor(mock_scf, event_queue, 0.83, None)
         readings = _readings(front=0.55, right=0.25)
         assert monitor._diagonal_detected(readings) is False
@@ -1145,7 +1145,7 @@ class TestDiagonalDetected:
 
 
 # ---------------------------------------------------------------------------
-# _diagonal_warn_detected — 1.5× diagonal threshold warning
+# _diagonal_warn_detected - 1.5× diagonal threshold warning
 # ---------------------------------------------------------------------------
 
 
@@ -1195,7 +1195,7 @@ class TestDiagonalWarnDetected:
 
 
 # ---------------------------------------------------------------------------
-# _run_once diagonal integration — triggers when only diagonal fires
+# _run_once diagonal integration - triggers when only diagonal fires
 # ---------------------------------------------------------------------------
 
 
@@ -1243,7 +1243,7 @@ class TestRunOnceDiagonal:
         assert event_queue.get_nowait() == "COLLISION"
 
     def test_diagonal_does_not_trigger_when_both_pairs_clear(self, mock_scf, event_queue, mocker):
-        # front=0.65, left=0.65, right=0.65 — diagonal ≈ 0.943 > 0.66 → no trigger
+        # front=0.65, left=0.65, right=0.65 - diagonal ≈ 0.943 > 0.66 → no trigger
         readings = MultiRangerReadings(front=0.65, back=None, left=0.65, right=0.65, up=None)
         monitor, _ = self._make_monitor_with_direction(
             mock_scf,
@@ -1279,7 +1279,7 @@ class TestRunOnceDiagonal:
 
     def test_up_direction_skips_diagonal_check(self, mock_scf, event_queue, mocker):
         # All horizontal sensors close, but direction="up" → no diagonal pairs.
-        # For "up", only "up" is leading — front/back/left/right are all
+        # For "up", only "up" is leading - front/back/left/right are all
         # non-leading "side" sensors, so at v=0.83 they must clear the
         # additive side threshold (0.10 + 0.83*0.65 = 0.6395 m), not the old
         # flat _SIDE_CLEARANCE_M=0.10.
@@ -1311,7 +1311,7 @@ class TestRunOnceDiagonal:
 
 
 # ---------------------------------------------------------------------------
-# Diagonal fallback avoidance — reverse flight direction when no sensor fired
+# Diagonal fallback avoidance - reverse flight direction when no sensor fired
 # ---------------------------------------------------------------------------
 
 
@@ -1343,7 +1343,7 @@ class TestDiagonalFallbackAvoidance:
     def test_moves_back_when_diagonal_fires_in_forward_direction(
         self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
     ) -> None:
-        # v=0.05 (deliberately low — see note below), forward: front=0.30,
+        # v=0.05 (deliberately low - see note below), forward: front=0.30,
         # right=0.15 → neither direct check fires, but the diagonal pair
         # does → find_avoidance_move returns None → fallback should move
         # "back".
@@ -1352,10 +1352,10 @@ class TestDiagonalFallbackAvoidance:
         # side threshold (decision 2): at high velocity (e.g. the old 0.83
         # m/s used here) side_threshold ≈ 0.64 m grows to nearly match the
         # diagonal threshold (≈0.66 m), so the side sensor's own direct
-        # check fires before the diagonal combination ever gets evaluated —
+        # check fires before the diagonal combination ever gets evaluated -
         # there is no longer a "diagonal fires, nothing direct does" window
         # at that speed. At v=0.05: leading threshold=0.25, side
-        # threshold=0.1325, diagonal threshold=0.37 — front=0.30>0.25 and
+        # threshold=0.1325, diagonal threshold=0.37 - front=0.30>0.25 and
         # right=0.15>0.1325 (both direct-safe), but
         # sqrt((0.317)²+(0.167)²)≈0.358 < 0.37 (diagonal fires).
         readings = MultiRangerReadings(front=0.30, back=None, left=None, right=0.15, up=None)
@@ -1575,7 +1575,7 @@ class TestAdaptivePause:
         self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
     ) -> None:
         """After is_correcting() returns False, a close sensor fires _trigger."""
-        very_close = 0.05  # below _SIDE_CLEARANCE_M — guaranteed collision
+        very_close = 0.05  # below _SIDE_CLEARANCE_M - guaranteed collision
         readings = MultiRangerReadings(front=very_close, back=None, left=None, right=None, up=None)
         monitor, mock_ranger, mock_corrector = self._make_monitor_with_adaptive(
             mock_scf, event_queue, mocker, is_correcting=False, readings=readings
@@ -1605,14 +1605,14 @@ class TestAdaptivePause:
 
 
 # ---------------------------------------------------------------------------
-# FlightRecorder integration — every poll cycle recorded, fresh-read fix
+# FlightRecorder integration - every poll cycle recorded, fresh-read fix
 # ---------------------------------------------------------------------------
 
 
 class TestFlightRecorderIntegration:
     """CollisionMonitor records every ranger reading when a recorder is
     attached, and _trigger() computes its avoidance move from a *fresh*
-    reading taken after mc.stop() — not the reading that caused the trigger.
+    reading taken after mc.stop() - not the reading that caused the trigger.
     """
 
     def test_run_once_records_reading_when_recorder_attached(
@@ -1685,7 +1685,7 @@ class TestFlightRecorderIntegration:
     ) -> None:
         """Regression test for the momentum bug: the pre-stop reading shows
         no obstacle on the left (would not trigger a left-avoidance), but
-        the fresh post-stop reading does — the avoidance move must be based
+        the fresh post-stop reading does - the avoidance move must be based
         on the post-stop reading, proving _trigger() re-reads rather than
         reusing the stale pre-stop snapshot.
         """
@@ -1700,7 +1700,7 @@ class TestFlightRecorderIntegration:
         monitor._trigger(mock_ranger)
 
         # Avoidance direction computed from post_stop_readings (left close) is
-        # "right" — not "back", which the stale pre_stop_readings would give.
+        # "right" - not "back", which the stale pre_stop_readings would give.
         mock_mc.right.assert_called_once()
         mock_mc.back.assert_not_called()
 
@@ -1718,7 +1718,7 @@ class TestFlightRecorderIntegration:
         self, mock_scf: Any, event_queue: queue.Queue[str], mocker: Any
     ) -> None:
         """Regression test: a telemetry disk write must never sit between
-        mc.stop() and the avoidance move — both are time-critical and must
+        mc.stop() and the avoidance move - both are time-critical and must
         fire back-to-back with no recording call in between.
         """
         mock_recorder = mocker.MagicMock()
@@ -1740,7 +1740,7 @@ class TestFlightRecorderIntegration:
 
 
 # ---------------------------------------------------------------------------
-# "forward_left" composite direction — WallFollower's 45° diagonal travel.
+# "forward_left" composite direction - WallFollower's 45° diagonal travel.
 # See Crazyflie.flight.wall_follower. front and left are both leading
 # sensors; back, right and up are side sensors.
 # ---------------------------------------------------------------------------
@@ -1856,7 +1856,7 @@ class TestForwardLeftCompositeDirection:
 
     def test_held_wall_follow_geometry_does_not_trigger(self, mock_scf, event_queue, mocker):
         """front=right=left=0.60 m is the geometry WallFollower deliberately
-        holds at its 0.60 m setpoint — must never trigger, on any check
+        holds at its 0.60 m setpoint - must never trigger, on any check
         (direct or diagonal).
         """
         readings = MultiRangerReadings(front=0.60, back=None, left=0.60, right=0.60, up=None)
@@ -1872,8 +1872,8 @@ class TestForwardLeftCompositeDirection:
     def test_diagonal_pair_checked_without_raising(self, mock_scf, event_queue, mocker):
         """_diagonal_detected must be reachable for 'forward_left' (the
         (front, left) pair is registered in _DIAGONAL_PAIRS) without raising,
-        even though — given front and left share the same, relatively large
-        leading threshold at this velocity — the minimum diagonal distance
+        even though - given front and left share the same, relatively large
+        leading threshold at this velocity - the minimum diagonal distance
         achievable while both are individually direct-safe (0.3776 m) is
         already above the diagonal threshold (0.37 m), so in practice the
         direct leading check always fires first. This test only confirms the
@@ -1916,7 +1916,7 @@ class TestForwardLeftDiagonalFallback:
         self, mock_scf, event_queue, mocker
     ):
         """Sanity check: when front is genuinely close, the direct leading
-        check fires "back" on its own — the fallback path is not needed
+        check fires "back" on its own - the fallback path is not needed
         (and must not double-fire) in that case.
         """
         mock_ranger = mocker.MagicMock()
@@ -1937,7 +1937,7 @@ class TestForwardLeftDiagonalFallback:
         monitor._trigger(mock_ranger)
 
         # front=0.10 < leading threshold 0.25, so find_avoidance_move already
-        # returns "back" directly here — this exercises the direct path, not
+        # returns "back" directly here - this exercises the direct path, not
         # the fallback, confirming direct detection still wins when present.
         mock_mc.back.assert_called_once()
 
@@ -1971,8 +1971,8 @@ class TestForwardLeftDiagonalFallback:
         # Both readings are direct-safe (above leading threshold 0.25) so
         # find_avoidance_move returns None; _trigger() does not re-check
         # _diagonal_detected() before falling back (matching every other
-        # direction's existing fallback — see TestDiagonalFallbackAvoidance)
-        # — it compares front vs left directly whenever both are present.
+        # direction's existing fallback - see TestDiagonalFallbackAvoidance)
+        # - it compares front vs left directly whenever both are present.
         mock_mc.back.assert_called_once()
         mock_mc.right.assert_not_called()
 
@@ -1999,7 +1999,7 @@ class TestForwardLeftDiagonalFallback:
 
     def test_fallback_not_applied_when_front_or_left_missing(self, mock_scf, event_queue, mocker):
         """If either leading reading is None post-stop, the fallback must not
-        guess — no avoidance move should fire.
+        guess - no avoidance move should fire.
         """
         mock_ranger = mocker.MagicMock()
         mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)

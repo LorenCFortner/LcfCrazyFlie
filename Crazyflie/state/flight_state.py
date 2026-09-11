@@ -8,20 +8,20 @@ them to compute velocity-appropriate detection thresholds and apply
 directional sensor logic.
 
 Write access discipline:
-    current_velocity_m_s — SafeFlightController or WallFollower only.
-    current_direction     — SafeFlightController or WallFollower only.
+    current_velocity_m_s - SafeFlightController or WallFollower only.
+    current_direction     - SafeFlightController or WallFollower only.
     No other component should call set_velocity() or set_direction(). This
     ownership rule keeps the state consistent: only the component that knows
-    the ground truth may write it — and each flight mode has exactly one
+    the ground truth may write it - and each flight mode has exactly one
     such component active at a time.
 
 Direction values:
-    'forward', 'back', 'left', 'right', 'up' — a single-axis linear move.
-    'forward_left' — WallFollower's continuous 45° diagonal travel (forward
+    'forward', 'back', 'left', 'right', 'up' - a single-axis linear move.
+    'forward_left' - WallFollower's continuous 45° diagonal travel (forward
         and left simultaneously). CollisionMonitor treats both 'front' and
         'left' as leading sensors for this direction (see
         _FLIGHT_DIR_TO_SENSORS in collision_monitor.py).
-    None — hovering, turning, or direction unknown. A turn always pairs
+    None - hovering, turning, or direction unknown. A turn always pairs
         None with velocity 0.0 (SafeFlightController zeroes velocity when it
         clears direction on a turn) since a stationary pivot has no linear
         stopping distance to protect.
@@ -64,7 +64,7 @@ class FlightState:
     """
 
     def __init__(self, current_velocity_m_s: float = 0.0) -> None:
-        """Initialise with an optional starting velocity.
+        """Initialize with an optional starting velocity.
 
         Args:
             current_velocity_m_s: Initial velocity in m/s. Defaults to 0.0.

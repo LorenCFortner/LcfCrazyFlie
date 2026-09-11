@@ -1,6 +1,6 @@
 """LED Ring deck control for Crazyflie 2.0.
 
-Wraps the ring.* parameter interface. All methods are static — pass the
+Wraps the ring.* parameter interface. All methods are static - pass the
 connected SyncCrazyflie instance each time. No state is held here; the
 drone firmware owns the LED state.
 """
@@ -88,7 +88,7 @@ class LedRingDeck:
     def set_brightness_from_height_mm(scf: SyncCrazyflie, height_mm: float) -> None:
         """Set LED brightness proportional to the drone's height above ground.
 
-        Maps the flow-deck's range.zrange reading (in millimetres) to a
+        Maps the flow-deck's range.zrange reading (in millimeters) to a
         brightness level between MIN_BRIGHTNESS and MAX_BRIGHTNESS. Values
         outside [MIN_HEIGHT_MM, MAX_HEIGHT_MM] are clamped.
 

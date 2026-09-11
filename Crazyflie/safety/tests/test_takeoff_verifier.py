@@ -34,7 +34,7 @@ class TestVerifyTakeoff:
         )
 
     def test_returns_true_when_only_voltage_dropped(self):
-        # Height flat but voltage sagged — motors were spinning
+        # Height flat but voltage sagged - motors were spinning
         assert (
             verify_takeoff(
                 height_mm=6,
@@ -46,7 +46,7 @@ class TestVerifyTakeoff:
         )
 
     def test_returns_true_when_only_height_changed(self):
-        # Voltage flat but height rose — consider it flying
+        # Voltage flat but height rose - consider it flying
         assert (
             verify_takeoff(
                 height_mm=400,

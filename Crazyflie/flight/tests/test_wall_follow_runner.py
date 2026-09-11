@@ -3,7 +3,7 @@
 Written test-first following the TDD rules for this project.
 run_wall_follow_flight() delegates the shared connect/clearance/monitor/
 teardown lifecycle to Crazyflie.flight.flight_lifecycle.run_flight_lifecycle()
-— that machinery is covered by test_flight_lifecycle.py. Most tests here mock
+- that machinery is covered by test_flight_lifecycle.py. Most tests here mock
 run_flight_lifecycle itself and inspect/invoke the flight_body_fn it builds,
 so they exercise only this runner's own logic: waiting for the first
 Multi-ranger reading, then the search -> align -> follow sequence.
@@ -66,7 +66,7 @@ class TestCollisionMonitorRangerAdapter:
 
     def test_returns_empty_sentinel_when_stale(self, mocker):
         """A stale reading is reported by CollisionMonitor.get_latest_readings
-        as None (that is where the staleness check actually lives) — confirm
+        as None (that is where the staleness check actually lives) - confirm
         the adapter maps that through to the same empty sentinel used for
         "no reading yet", so WallFollower's existing None-handling covers
         both cases identically.
@@ -113,7 +113,7 @@ class TestWaitForFirstRangerReading:
 
 
 # ---------------------------------------------------------------------------
-# run_flight_lifecycle wiring — uri, telemetry_file, hooks passed through.
+# run_flight_lifecycle wiring - uri, telemetry_file, hooks passed through.
 # ---------------------------------------------------------------------------
 
 _URI = "radio://0/80/2M"
@@ -194,7 +194,7 @@ class TestLifecycleWiring:
 
 
 # ---------------------------------------------------------------------------
-# WallFollower wiring — search -> align -> follow, in order
+# WallFollower wiring - search -> align -> follow, in order
 # ---------------------------------------------------------------------------
 
 
@@ -291,7 +291,7 @@ class TestWallFollowerWiring:
 
 # ---------------------------------------------------------------------------
 # Post-phase should_abort() -> handle_safety_events handoff (mirrors the
-# equivalent out_and_back_runner behaviour — CollisionMonitor sets
+# equivalent out_and_back_runner behavior - CollisionMonitor sets
 # is_triggered() True before its blocking avoidance move finishes and queues
 # "COLLISION", so a should_abort()==True check must wait for the event
 # rather than miss it).

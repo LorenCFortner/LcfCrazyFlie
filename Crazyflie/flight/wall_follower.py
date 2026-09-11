@@ -3,8 +3,8 @@
 Flies forward until an obstacle is found, rotates counter-clockwise until
 the front and right Multi-ranger sensors read equal distance (45 deg to the
 wall), then flies that 45 deg diagonal (forward and left simultaneously)
-along the wall — continuously yawing to hold front == right (heading) and
-holding their common value at a target distance (standoff) — using a
+along the wall - continuously yawing to hold front == right (heading) and
+holding their common value at a target distance (standoff) - using a
 closed-loop velocity command recomputed every poll cycle from fresh sensor
 readings, rather than a pre-planned sequence of blocking steps.
 
@@ -29,7 +29,7 @@ An inside corner or any obstacle closing in ahead grows the heading error
 is capped (max_yaw_rate_deg_s) and cannot always complete the turn before
 front reaches CollisionMonitor's own threshold if forward push continues
 unabated (observed on hardware -- see scripts/logs/right_wall_follow.log,
-08:30:36 run). To generalise beyond a fixed-speed continuing push, front
+08:30:36 run). To generalize beyond a fixed-speed continuing push, front
 proximity throttles the along-wall speed term directly: as front closes
 toward CollisionMonitor's own leading-sensor threshold, the forward-push
 component of the velocity command (v_follow) is scaled down proportionally,
@@ -42,6 +42,20 @@ compute_follow_command() for the exact formula. This is an approximation,
 not a guarantee -- CollisionMonitor remains the untouched, authoritative
 backstop.
 
+A missing front reading (None, or <= 0.0) means "nothing within
+MAX_RANGE_M" per Crazyflie.decks.multi_ranger's own convention -- not a
+fault, and not "the wall is lost". It is substituted with MAX_RANGE_M and
+flows through the same heading/standoff/brake formula as any other
+reading, rather than short-circuiting to a zero command (observed on
+hardware turning this into a false wall-lost stop -- see
+scripts/logs/right_wall_follow.log, 08:58:12 run: front went permanently
+None mid-corner while right stayed valid, and wall_lost_timeout_s fired).
+With front this large, the heading-error yaw clamp is driven to its
+maximum turning toward right -- exactly the "rotate the sensor back toward
+the wall" response a genuinely out-of-range front calls for. right is
+unaffected by this: right is the wall actually being followed, so a
+missing right reading still means the wall is genuinely lost.
+
 Blade protection: full five-sensor CollisionMonitor detection stays active
 throughout (see Crazyflie.safety.collision_monitor's "forward_left" support)
 as the sole general-purpose backstop; the follow() loop *additionally*
@@ -50,15 +64,17 @@ followed wall on the right is deliberately held close and so is not covered
 by a leading-edge threshold -- if the standoff control drifts inward, this
 catches it before the blade floor does. Neither layer replaces the other.
 
-Losing the wall (front and right both unreadable for wall_lost_timeout_s)
-or a proximity abort both stop the flight rather than search for the wall
-again -- chasing a lost wall (an outside corner, a doorway) is out of scope.
+Losing the wall (right unreadable for wall_lost_timeout_s -- a missing
+front alone no longer counts, see above) or a proximity abort both stop the
+flight rather than search for the wall again -- chasing a lost wall (right
+itself gone, e.g. the wall ends and nothing is in range on that side
+either) is out of scope.
 
 The "ranger" argument accepted by fly_to_first_obstacle(), align_to_wall()
-and follow() is any RangerSource (see below) — in production this is
+and follow() is any RangerSource (see below) - in production this is
 Crazyflie.flight.wall_follow_runner's _CollisionMonitorRangerAdapter, which
 reads CollisionMonitor's already-open Multi-ranger connection rather than
-opening a second one (unsafe — see CollisionMonitor.get_latest_readings).
+opening a second one (unsafe - see CollisionMonitor.get_latest_readings).
 
 Example:
     >>> follower = WallFollower(WallFollowConfig(), flight_state=flight_state)
@@ -79,7 +95,7 @@ from typing import Protocol
 
 from cflib.positioning.motion_commander import MotionCommander
 
-from Crazyflie.decks.multi_ranger import MultiRangerReadings
+from Crazyflie.decks.multi_ranger import MAX_RANGE_M, MultiRangerReadings
 from Crazyflie.safety.collision_monitor import _BASE_DETECTION_M, _REACTION_S
 from Crazyflie.state.flight_state import FlightState
 
@@ -122,21 +138,23 @@ class WallFollowConfig:
         follow_velocity_m_s: Along-wall speed once following has started.
         max_velocity_m_s: Hard clamp on the total commanded speed
             (hypot(vx, vy)).
-        standoff_gain: Proportional gain converting standoff error (metres)
+        standoff_gain: Proportional gain converting standoff error (meters)
             into a velocity correction toward/away from the wall (m/s).
         yaw_gain_deg_per_m: Proportional gain converting heading error
-            (front - right, metres) into a yaw rate correction (deg/s).
+            (front - right, meters) into a yaw rate correction (deg/s).
         max_yaw_rate_deg_s: Hard clamp on the commanded yaw rate.
         align_tolerance_m: How close front and right must read to each
-            other, in metres, to be considered aligned.
+            other, in meters, to be considered aligned.
         align_step_deg: Rotation per incremental turn_left() during
             alignment.
         max_align_deg: Total rotation budget before alignment gives up.
         approach_velocity_m_s: Forward speed while searching for the wall.
         max_search_distance_m: Distance budget before the search gives up.
         follow_duration_s: Maximum time to spend following before stopping.
-        wall_lost_timeout_s: How long front and right may both be unreadable
-            before the follow loop gives up and stops.
+        wall_lost_timeout_s: How long right (the wall actually being
+            followed) may be unreadable before the follow loop gives up
+            and stops. A missing front alone does not count -- see the
+            module docstring.
         abort_distance_m: WallFollower's own proximity check (is_too_close)
             -- ends the flight if any of the five sensors reads below this,
             independent of and in addition to CollisionMonitor.
@@ -182,8 +200,11 @@ class FollowCommand:
         vx: Forward velocity component in m/s (body frame).
         vy: Left velocity component in m/s (body frame).
         yaw_rate_deg_s: Commanded yaw rate in deg/s (positive = left/CCW).
-        wall_visible: False when front or right was unreadable this cycle,
-            in which case vx, vy and yaw_rate_deg_s are all 0.0.
+        wall_visible: False when right (the wall actually being followed)
+            was unreadable this cycle, in which case vx, vy and
+            yaw_rate_deg_s are all 0.0. A missing front does not affect
+            this -- it is treated as a very far reading (MAX_RANGE_M), not
+            as the wall being lost.
     """
 
     vx: float
@@ -207,7 +228,7 @@ class WallFollower:
         config: WallFollowConfig | None = None,
         flight_state: FlightState | None = None,
     ) -> None:
-        """Initialise the wall follower.
+        """Initialize the wall follower.
 
         Args:
             config: Tuning parameters. Defaults to WallFollowConfig() when
@@ -231,24 +252,38 @@ class WallFollower:
         derivation.
 
         Args:
-            front: Front Multi-ranger distance in metres, or None/<=0.0 if
-                unreadable.
-            right: Right Multi-ranger distance in metres, or None/<=0.0 if
-                unreadable.
+            front: Front Multi-ranger distance in meters, or None/<=0.0 if
+                nothing is within MAX_RANGE_M -- treated as a very far
+                reading (MAX_RANGE_M), not as unreadable. See module
+                docstring.
+            right: Right Multi-ranger distance in meters, or None/<=0.0 if
+                unreadable -- right is the wall actually being followed, so
+                a missing reading here means the wall is genuinely lost.
 
         Returns:
             FollowCommand with wall_visible=False (and all-zero velocity)
-            when either reading is missing; otherwise the computed
-            heading + standoff correction, clamped to max_velocity_m_s and
-            max_yaw_rate_deg_s. The forward-push term is additionally
+            when right is missing; otherwise the computed heading +
+            standoff correction, clamped to max_velocity_m_s and
+            max_yaw_rate_deg_s. A missing front is substituted with
+            MAX_RANGE_M before this computation, so it still yields
+            wall_visible=True and a live command -- typically a hard yaw
+            back toward the wall. The forward-push term is additionally
             throttled by front proximity -- see front_brake_zone_m.
         """
         cfg = self._config
-        if front is None or front <= 0.0 or right is None or right <= 0.0:
+        if right is None or right <= 0.0:
             return FollowCommand(vx=0.0, vy=0.0, yaw_rate_deg_s=0.0, wall_visible=False)
 
-        heading_error = front - right
-        standoff_error = (front + right) / 2.0 - cfg.target_wall_distance_m
+        # A missing/invalid front means "nothing within MAX_RANGE_M", per
+        # Crazyflie.decks.multi_ranger's own convention (None is not a
+        # fault) -- substitute that distance and let the existing formula
+        # below react to it like any other far reading. This is what turns
+        # the sensor back toward the wall: with front this large, the yaw
+        # clamp below is driven to its maximum turning toward right.
+        front_effective = front if front is not None and front > 0.0 else MAX_RANGE_M
+
+        heading_error = front_effective - right
+        standoff_error = (front_effective + right) / 2.0 - cfg.target_wall_distance_m
 
         yaw_rate = -cfg.yaw_gain_deg_per_m * heading_error
         yaw_rate = max(-cfg.max_yaw_rate_deg_s, min(cfg.max_yaw_rate_deg_s, yaw_rate))
@@ -267,7 +302,7 @@ class WallFollower:
         # threshold would under-estimate CollisionMonitor's real one --
         # re-derive this comment's numbers if either constant changes.
         front_threshold = max(_BASE_DETECTION_M, cfg.follow_velocity_m_s * _REACTION_S)
-        front_scale = (front - front_threshold) / cfg.front_brake_zone_m
+        front_scale = (front_effective - front_threshold) / cfg.front_brake_zone_m
         front_scale = max(0.0, min(1.0, front_scale))
 
         v_follow = cfg.follow_velocity_m_s * front_scale
@@ -288,8 +323,8 @@ class WallFollower:
         """Return True if front and right read within align_tolerance_m.
 
         Args:
-            front: Front Multi-ranger distance in metres, or None/<=0.0.
-            right: Right Multi-ranger distance in metres, or None/<=0.0.
+            front: Front Multi-ranger distance in meters, or None/<=0.0.
+            right: Right Multi-ranger distance in meters, or None/<=0.0.
 
         Returns:
             True if both readings are valid and their difference is within
@@ -374,7 +409,7 @@ class WallFollower:
         CollisionMonitor does not judge this stationary rotation against a
         stale linear velocity left over from the search leg.
 
-        Near 45 degrees, front and right diverge quickly with heading — for
+        Near 45 degrees, front and right diverge quickly with heading - for
         a typical approach distance, one align_step_deg step changes
         abs(front - right) by roughly 3x align_tolerance_m's default. A pure
         "is the difference within tolerance" check can therefore straddle
@@ -382,7 +417,7 @@ class WallFollower:
         tolerance window, spinning through the whole max_align_deg budget.
         To stay robust regardless of the actual approach distance, alignment
         also stops the instant (front - right) changes sign between two
-        consecutive steps — that means the 45 degree crossing happened
+        consecutive steps - that means the 45 degree crossing happened
         somewhere in the step just taken, so this heading is within one
         align_step_deg of true alignment. follow()'s continuous yaw
         correction removes that residual once wall-following starts; it is
@@ -455,13 +490,13 @@ class WallFollower:
             if should_abort is not None and should_abort():
                 break
             if time.monotonic() - start_time >= cfg.follow_duration_s:
-                logger.info("WallFollower: follow_duration_s elapsed — stopping.")
+                logger.info("WallFollower: follow_duration_s elapsed - stopping.")
                 break
 
             readings = ranger.get_readings()
             if self.is_too_close(readings):
                 logger.warning(
-                    "WallFollower: a sensor is within abort_distance_m (%.2f m) — stopping.",
+                    "WallFollower: a sensor is within abort_distance_m (%.2f m) - stopping.",
                     cfg.abort_distance_m,
                 )
                 break
@@ -472,7 +507,7 @@ class WallFollower:
                 last_wall_seen_time = now
             elif now - last_wall_seen_time >= cfg.wall_lost_timeout_s:
                 logger.warning(
-                    "WallFollower: wall lost for %.1f s — stopping.", cfg.wall_lost_timeout_s
+                    "WallFollower: wall lost for %.1f s - stopping.", cfg.wall_lost_timeout_s
                 )
                 break
 
@@ -480,7 +515,7 @@ class WallFollower:
                 self._flight_state.set_direction(FLIGHT_DIRECTION)
                 self._flight_state.set_velocity(math.hypot(command.vx, command.vy))
 
-            # Re-check immediately before the motion command itself — see
+            # Re-check immediately before the motion command itself - see
             # docstring above.
             if should_abort is not None and should_abort():
                 break

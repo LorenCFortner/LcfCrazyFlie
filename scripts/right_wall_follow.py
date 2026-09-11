@@ -4,7 +4,7 @@ Uses WallFollower for continuous, sensor-driven flight rather than a
 pre-planned path: flies forward until the front Multi-ranger sensor reaches
 the target wall distance, rotates counter-clockwise until front and right
 read equal (45 degrees to the wall), then flies that diagonal (forward and
-left simultaneously) along the wall — continuously yawing to hold
+left simultaneously) along the wall - continuously yawing to hold
 front == right and holding their common value at the target distance.
 
 Blade protection is active for the entire flight, on all five Multi-ranger
@@ -14,14 +14,14 @@ check. See Crazyflie.flight.wall_follower and
 Crazyflie.safety.collision_monitor for the full design.
 
 Pre-flight:
-  1. Clearance check — aborts if any direction is within 0.1 m.
+  1. Clearance check - aborts if any direction is within 0.1 m.
   2. LED headlights on.
 
 Post-flight: LED ring off.
 
-Safety events handled: CRASH, BATLOW, COLLISION. Any of these — or the
-follower's own proximity abort, or losing sight of the wall — stops the
-flight and lands in place. There is no retrace-home behaviour: a wall
+Safety events handled: CRASH, BATLOW, COLLISION. Any of these - or the
+follower's own proximity abort, or losing sight of the wall - stops the
+flight and lands in place. There is no retrace-home behavior: a wall
 follow has no recorded path to retrace.
 
 Defaults are deliberately conservative for a first real flight: 0.15 m/s

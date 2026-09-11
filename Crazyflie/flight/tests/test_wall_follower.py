@@ -14,7 +14,10 @@ from Crazyflie.flight.wall_follower import (
     WallFollowConfig,
     WallFollower,
 )
+from Crazyflie.safety.collision_monitor import _BASE_DETECTION_M, _REACTION_S
 from Crazyflie.state.flight_state import FlightState
+
+_SQRT2 = math.sqrt(2.0)
 
 
 def _readings(front=None, back=None, left=None, right=None, up=None) -> MultiRangerReadings:
@@ -125,6 +128,147 @@ class TestComputeFollowCommand:
         result2 = follower.compute_follow_command(0.6, 0.6)
 
         assert result1 == result2
+
+
+# ---------------------------------------------------------------------------
+# Front-proximity brake — throttles forward push as `front` closes on
+# anything (corner, protrusion, person), independent of heading/standoff.
+# Mirrors AdaptivePathCorrector's velocity-scaled zone, shaped after
+# CollisionMonitor's own leading-sensor threshold formula.
+# ---------------------------------------------------------------------------
+
+
+def _front_threshold(cfg: WallFollowConfig) -> float:
+    return max(_BASE_DETECTION_M, cfg.follow_velocity_m_s * _REACTION_S)
+
+
+def _unbraked_vx_vy(cfg: WallFollowConfig, front: float, right: float) -> tuple[float, float]:
+    """Reference vx/vy using the pre-brake formula (v_follow unscaled)."""
+    standoff_error = (front + right) / 2.0 - cfg.target_wall_distance_m
+    v_correct = cfg.standoff_gain * standoff_error
+    vx = (cfg.follow_velocity_m_s + v_correct) / _SQRT2
+    vy = (cfg.follow_velocity_m_s - v_correct) / _SQRT2
+    speed = math.hypot(vx, vy)
+    if speed > cfg.max_velocity_m_s and speed > 0.0:
+        scale = cfg.max_velocity_m_s / speed
+        vx *= scale
+        vy *= scale
+    return vx, vy
+
+
+class TestFrontProximityBrake:
+    def test_no_effect_at_or_above_zone_upper(self):
+        """front_scale clamps to 1.0 (no forward-speed boost) at the zone's
+        upper edge and beyond -- braking must be a no-op during ordinary
+        steady-state following, where front sits near target_wall_distance_m.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        zone_upper = _front_threshold(cfg) + cfg.front_brake_zone_m
+
+        for front in (zone_upper, zone_upper + 0.5, cfg.target_wall_distance_m):
+            command = follower.compute_follow_command(
+                front=front, right=cfg.target_wall_distance_m
+            )
+            expected_vx, expected_vy = _unbraked_vx_vy(cfg, front, cfg.target_wall_distance_m)
+            assert command.vx == pytest.approx(expected_vx)
+            assert command.vy == pytest.approx(expected_vy)
+
+    def test_forward_push_is_zero_at_front_threshold(self):
+        """At front == front_threshold, v_follow_effective == 0.0 -- vx/vy
+        come from v_correct alone.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        right = 0.60
+        front = _front_threshold(cfg)
+
+        command = follower.compute_follow_command(front=front, right=right)
+
+        standoff_error = (front + right) / 2.0 - cfg.target_wall_distance_m
+        v_correct = cfg.standoff_gain * standoff_error
+        expected_vx = v_correct / _SQRT2
+        expected_vy = -v_correct / _SQRT2
+        assert command.vx == pytest.approx(expected_vx)
+        assert command.vy == pytest.approx(expected_vy)
+
+    def test_front_scale_does_not_go_negative_below_threshold(self):
+        """Below front_threshold, front_scale clamps to 0.0 -- it must not
+        flip the forward term's sign on its own (only v_correct may).
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        right = 0.60
+        front = _front_threshold(cfg) - 0.10
+
+        command = follower.compute_follow_command(front=front, right=right)
+
+        standoff_error = (front + right) / 2.0 - cfg.target_wall_distance_m
+        v_correct = cfg.standoff_gain * standoff_error
+        expected_vx = v_correct / _SQRT2
+        expected_vy = -v_correct / _SQRT2
+        speed = math.hypot(expected_vx, expected_vy)
+        if speed > cfg.max_velocity_m_s and speed > 0.0:
+            scale = cfg.max_velocity_m_s / speed
+            expected_vx *= scale
+            expected_vy *= scale
+        assert command.vx == pytest.approx(expected_vx)
+        assert command.vy == pytest.approx(expected_vy)
+
+    def test_halfway_through_zone_scales_v_follow_by_half(self):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        right = 0.60
+        front = _front_threshold(cfg) + cfg.front_brake_zone_m / 2.0
+
+        command = follower.compute_follow_command(front=front, right=right)
+
+        standoff_error = (front + right) / 2.0 - cfg.target_wall_distance_m
+        v_correct = cfg.standoff_gain * standoff_error
+        v_follow_effective = cfg.follow_velocity_m_s * 0.5
+        expected_vx = (v_follow_effective + v_correct) / _SQRT2
+        expected_vy = (v_follow_effective - v_correct) / _SQRT2
+        assert command.vx == pytest.approx(expected_vx)
+        assert command.vy == pytest.approx(expected_vy)
+
+    def test_reproduces_reduced_push_for_logged_corner_scenario(self):
+        """Regression guard: the exact front/right pair from
+        scripts/logs/right_wall_follow_telemetry.csv (08:30:36 run, row at
+        t=1789129862.6209798) that preceded the COLLISION trigger. The
+        braked vx must be smaller than the pre-fix formula would have
+        produced -- this test fails against the old, un-braked
+        compute_follow_command.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        front, right = 0.314, 0.608
+
+        command = follower.compute_follow_command(front=front, right=right)
+        unbraked_vx, _ = _unbraked_vx_vy(cfg, front, right)
+
+        assert command.vx < unbraked_vx
+
+    def test_yaw_rate_unaffected_by_front_brake(self):
+        """yaw_rate_deg_s depends only on heading_error -- confirm the brake
+        didn't get accidentally coupled into it.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+
+        braked = follower.compute_follow_command(front=0.20, right=0.60)
+        unbraked = follower.compute_follow_command(front=1.0, right=1.4)  # same heading_error
+
+        assert braked.yaw_rate_deg_s == pytest.approx(unbraked.yaw_rate_deg_s)
+
+    def test_default_zone_matches_documented_numbers(self):
+        """Pins the worked example in task.md -- front_threshold == 0.25 and
+        front_zone_upper == 0.40 at the shipped defaults. A future change to
+        _BASE_DETECTION_M/_REACTION_S or the defaults should surface here.
+        """
+        cfg = WallFollowConfig()
+
+        assert _front_threshold(cfg) == pytest.approx(0.25)
+        assert _front_threshold(cfg) + cfg.front_brake_zone_m == pytest.approx(0.40)
 
 
 # ---------------------------------------------------------------------------

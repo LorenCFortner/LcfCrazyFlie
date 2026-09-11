@@ -24,9 +24,23 @@ Error signals:
   - Standoff error = mean(front, right) - target_wall_distance_m. Positive
     means too far from the wall -> add velocity toward it (+n_hat).
 
-An inside corner needs no special case: as a perpendicular wall closes in
-ahead, front drops below right, the heading error goes negative, and the
-loop yaws left -- precisely the correct response.
+An inside corner or any obstacle closing in ahead grows the heading error
+(front drops relative to right) and the loop yaws to correct -- but yaw rate
+is capped (max_yaw_rate_deg_s) and cannot always complete the turn before
+front reaches CollisionMonitor's own threshold if forward push continues
+unabated (observed on hardware -- see scripts/logs/right_wall_follow.log,
+08:30:36 run). To generalise beyond a fixed-speed continuing push, front
+proximity throttles the along-wall speed term directly: as front closes
+toward CollisionMonitor's own leading-sensor threshold, the forward-push
+component of the velocity command (v_follow) is scaled down proportionally,
+reaching zero at the threshold itself. This applies to any close-ahead
+reading -- a corner, a protrusion, anything -- with no classification of
+*why* front is close, mirroring AdaptivePathCorrector's velocity-scaled
+buffer zone (see Crazyflie.safety.adaptive_path_corrector) applied to this
+loop's own control law instead. See WallFollowConfig.front_brake_zone_m and
+compute_follow_command() for the exact formula. This is an approximation,
+not a guarantee -- CollisionMonitor remains the untouched, authoritative
+backstop.
 
 Blade protection: full five-sensor CollisionMonitor detection stays active
 throughout (see Crazyflie.safety.collision_monitor's "forward_left" support)
@@ -66,6 +80,7 @@ from typing import Protocol
 from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.decks.multi_ranger import MultiRangerReadings
+from Crazyflie.safety.collision_monitor import _BASE_DETECTION_M, _REACTION_S
 from Crazyflie.state.flight_state import FlightState
 
 logger = logging.getLogger(__name__)
@@ -125,6 +140,13 @@ class WallFollowConfig:
         abort_distance_m: WallFollower's own proximity check (is_too_close)
             -- ends the flight if any of the five sensors reads below this,
             independent of and in addition to CollisionMonitor.
+        front_brake_zone_m: Width of the front-proximity brake zone above
+            CollisionMonitor's own leading-sensor threshold
+            (max(_BASE_DETECTION_M, follow_velocity_m_s * _REACTION_S)). The
+            forward-push component of the velocity command scales linearly
+            from full speed at the zone's outer edge to zero at the
+            threshold itself -- see compute_follow_command() and the module
+            docstring.
 
     Velocities are deliberately low. At follow_velocity_m_s = 0.15 m/s the
     estimated stopping distance (~4 cm, extrapolated from the repo's tuning
@@ -149,6 +171,7 @@ class WallFollowConfig:
     follow_duration_s: float = 45.0
     wall_lost_timeout_s: float = 1.5
     abort_distance_m: float = 0.25
+    front_brake_zone_m: float = 0.15
 
 
 @dataclass
@@ -217,7 +240,8 @@ class WallFollower:
             FollowCommand with wall_visible=False (and all-zero velocity)
             when either reading is missing; otherwise the computed
             heading + standoff correction, clamped to max_velocity_m_s and
-            max_yaw_rate_deg_s.
+            max_yaw_rate_deg_s. The forward-push term is additionally
+            throttled by front proximity -- see front_brake_zone_m.
         """
         cfg = self._config
         if front is None or front <= 0.0 or right is None or right <= 0.0:
@@ -229,7 +253,24 @@ class WallFollower:
         yaw_rate = -cfg.yaw_gain_deg_per_m * heading_error
         yaw_rate = max(-cfg.max_yaw_rate_deg_s, min(cfg.max_yaw_rate_deg_s, yaw_rate))
 
-        v_follow = cfg.follow_velocity_m_s
+        # Front-proximity brake: mirrors CollisionMonitor's own leading-sensor
+        # threshold formula, offset outward by front_brake_zone_m, so the
+        # forward-push term tapers to zero before CollisionMonitor's threshold
+        # is ever reached -- for any close-ahead reading, not just a
+        # classified "corner". See module docstring.
+        # Uses the nominal follow_velocity_m_s, not the actual commanded
+        # speed (this function is pure -- no FlightState access). At today's
+        # defaults this is exact, not approximate: max_velocity_m_s=0.20
+        # still keeps CollisionMonitor's max(0.25, v*0.65) floor-dominated
+        # for any velocity this config can produce. If follow_velocity_m_s
+        # or max_velocity_m_s is tuned above the ~0.38 m/s crossover, this
+        # threshold would under-estimate CollisionMonitor's real one --
+        # re-derive this comment's numbers if either constant changes.
+        front_threshold = max(_BASE_DETECTION_M, cfg.follow_velocity_m_s * _REACTION_S)
+        front_scale = (front - front_threshold) / cfg.front_brake_zone_m
+        front_scale = max(0.0, min(1.0, front_scale))
+
+        v_follow = cfg.follow_velocity_m_s * front_scale
         v_correct = cfg.standoff_gain * standoff_error
 
         vx = (v_follow + v_correct) / _SQRT2

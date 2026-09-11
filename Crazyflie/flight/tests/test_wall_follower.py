@@ -4,16 +4,19 @@ Written test-first following the TDD rules for this project.
 """
 
 import math
+from collections.abc import Callable
 
 import pytest
 
 from Crazyflie.decks.multi_ranger import MAX_RANGE_M, MultiRangerReadings
 from Crazyflie.flight.wall_follower import (
+    _CORNER_ROTATION_DEG,
     _POLL_INTERVAL_S,
     FLIGHT_DIRECTION,
     FollowCommand,
     WallFollowConfig,
     WallFollower,
+    is_spike,
 )
 from Crazyflie.safety.collision_monitor import _BASE_DETECTION_M, _REACTION_S
 from Crazyflie.state.flight_state import FlightState
@@ -23,6 +26,23 @@ _SQRT2 = math.sqrt(2.0)
 
 def _readings(front=None, back=None, left=None, right=None, up=None) -> MultiRangerReadings:
     return MultiRangerReadings(front=front, back=back, left=left, right=right, up=up)
+
+
+def _looping_side_effect(
+    sequence: list[MultiRangerReadings],
+) -> Callable[..., MultiRangerReadings]:
+    """A get_readings side_effect that repeats the last item forever once
+    the given sequence is exhausted, so a generous should_abort() call
+    budget never runs past the end of a short, hand-written sequence.
+    """
+    state = {"i": 0}
+
+    def _next(*_args: object, **_kwargs: object) -> MultiRangerReadings:
+        index = min(state["i"], len(sequence) - 1)
+        state["i"] += 1
+        return sequence[index]
+
+    return _next
 
 
 # ---------------------------------------------------------------------------
@@ -125,16 +145,8 @@ class TestComputeFollowCommand:
     def test_front_missing_or_invalid_substitutes_max_range(self, front):
         """A missing/invalid front means "nothing within MAX_RANGE_M" per
         Crazyflie.decks.multi_ranger's own convention -- not "unreadable,
-        stop". It substitutes MAX_RANGE_M for the front-proximity-brake
-        pipeline (v_follow), which is identical whether front is missing or
-        a real reading exactly at MAX_RANGE_M -- that part is unaffected by
-        the missing-vs-valid distinction. The heading/standoff response
-        (vx, vy, yaw_rate_deg_s) is NOT necessarily expected to match a real
-        MAX_RANGE_M reading -- both drive the same sustained-yaw-saturation
-        hold/reacquire mechanism now (see TestYawSaturationEntersHolding),
-        but a bare, single isolated call never accumulates enough
-        saturated_cycles to enter it either way, so this assertion is
-        scoped to v_follow, which is unaffected by any of that.
+        stop". It substitutes MAX_RANGE_M and flows through the same
+        formula a real far reading would.
         """
         follower = WallFollower(WallFollowConfig())
         right = 0.40
@@ -142,7 +154,7 @@ class TestComputeFollowCommand:
         command = follower.compute_follow_command(front=front, right=right)
         expected = follower.compute_follow_command(front=MAX_RANGE_M, right=right)
 
-        assert command.v_follow == pytest.approx(expected.v_follow)
+        assert command == expected
         assert command.wall_visible is True
 
     def test_is_a_pure_function_no_side_effects(self):
@@ -394,281 +406,33 @@ class TestForwardPushSlewLimit:
 
 
 # ---------------------------------------------------------------------------
-# Sustained yaw saturation -> straight-line hold, then reacquire once right
-# recedes. Generalizes the earlier "front missing" corner-hold mechanism:
-# a missing front is only one way heading_error can become large enough to
-# saturate yaw at max_yaw_rate_deg_s (front_effective is substituted with
-# MAX_RANGE_M) -- a real, valid, but large front reading against a
-# close-and-stable right produces the identical runaway rotation. Reproduces
-# scripts/logs/right_wall_follow.log's 15:17 run: front read valid 2.2-2.3 m
-# values (never None) for ~2 continuous seconds while right stayed at
-# ~0.44-0.58 m, saturating yaw_rate at -45 deg/s the whole time (~90 degrees
-# of rotation at full speed) until the sensor picked up a surface that was,
-# per hardware evidence, already close the whole time but outside front's
-# narrow beam until the rotation swept onto it -- front then read 0.201 m
-# on the very next 100 ms poll and both safety backstops fired.
-#
-# The old 08:58:12-run fix's point still holds unmodified: front is None
-# only ever substitutes MAX_RANGE_M for the heading/standoff/brake formula
-# and never affects wall_visible -- see TestRightMissingStillMeansWallLost.
+# is_spike - a discontinuous jump (too fast to be gradual closing/opening
+# distance), the trigger for outward-corner negotiation. See the module
+# docstring.
 # ---------------------------------------------------------------------------
 
 
-class TestYawSaturationEntersHolding:
-    """Entry into the straight-line hold requires yaw to have been
-    saturated at max_yaw_rate_deg_s for yaw_saturation_hold_s continuously
-    -- a single saturated cycle (the previous mechanism's instant trigger
-    for a missing front) is not enough on its own.
-    """
+class TestIsSpike:
+    def test_jump_above_threshold_is_a_spike(self):
+        assert is_spike(current=2.0, previous=0.5, threshold_m=0.5) is True
 
-    def test_stays_normal_just_below_the_sustained_threshold(self):
-        """saturated_cycles=0 plus this (saturated) cycle -> 1 cycle *
-        _POLL_INTERVAL_S = 0.1 s < yaw_saturation_hold_s (0.20 s) -- still
-        chasing the heading normally, not yet holding. yaw_saturation_hold_s
-        is deliberately short (2 poll cycles) -- holding is a safe,
-        conservative state, so there is no safety reason to wait longer;
-        doing so would only reintroduce the phantom-wall-chasing behavior
-        the 08:58:12 fix eliminated, for however long the wait lasts. See
-        the module docstring.
-        """
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
+    def test_jump_exactly_at_threshold_is_a_spike(self):
+        assert is_spike(current=1.0, previous=0.5, threshold_m=0.5) is True
 
-        command = follower.compute_follow_command(front=2.3, right=0.5, saturated_cycles=0)
+    def test_jump_just_below_threshold_is_not_a_spike(self):
+        assert is_spike(current=0.99, previous=0.5, threshold_m=0.5) is False
 
-        assert command.holding is False
-        assert command.yaw_rate_deg_s == pytest.approx(-cfg.max_yaw_rate_deg_s)
-        assert command.saturated_cycles == 1
+    @pytest.mark.parametrize("current", [None, 0.0, -0.1])
+    def test_current_missing_with_valid_previous_is_a_spike(self, current):
+        assert is_spike(current=current, previous=0.5, threshold_m=0.5) is True
 
-    def test_enters_holding_once_sustained_threshold_crossed(self):
-        """saturated_cycles=1 plus this cycle -> 2 * 0.10 s = 0.2 s >=
-        yaw_saturation_hold_s (0.20 s) -- now holds straight.
-        """
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
+    @pytest.mark.parametrize("previous", [None, 0.0, -0.1])
+    def test_previous_missing_is_never_a_spike(self, previous):
+        assert is_spike(current=5.0, previous=previous, threshold_m=0.5) is False
+        assert is_spike(current=None, previous=previous, threshold_m=0.5) is False
 
-        command = follower.compute_follow_command(front=2.3, right=0.5, saturated_cycles=1)
-
-        assert command.holding is True
-        assert command.yaw_rate_deg_s == pytest.approx(0.0)
-        assert command.saturated_cycles == 0
-
-    def test_saturated_cycles_resets_when_heading_is_not_saturated(self):
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-
-        command = follower.compute_follow_command(front=0.60, right=0.60, saturated_cycles=4)
-
-        assert command.holding is False
-        assert command.saturated_cycles == 0
-
-    def test_missing_front_saturates_via_the_same_mechanism_not_instantly(self):
-        """A missing front is no longer a special-cased instant trigger --
-        it saturates yaw via the same MAX_RANGE_M-substitution formula as
-        before, but still needs sustained saturation to enter holding, the
-        same as a real large front reading. That said, with
-        yaw_saturation_hold_s this short, the exposure window is only one
-        poll cycle -- close to instant in practice, while still filtering a
-        single noisy reading.
-        """
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-
-        still_normal = follower.compute_follow_command(front=None, right=0.40, saturated_cycles=0)
-        now_holding = follower.compute_follow_command(front=None, right=0.40, saturated_cycles=1)
-
-        assert still_normal.holding is False
-        assert now_holding.holding is True
-        assert now_holding.yaw_rate_deg_s == pytest.approx(0.0)
-
-
-class TestHoldingStraightOnceEntered:
-    """Once holding (previously_holding=True), yaw is held at 0.0 and the
-    standoff correction is skipped, regardless of front's exact value --
-    latched the same way regardless of whether the underlying cause was a
-    missing front or a real large one.
-    """
-
-    def test_yaw_zero_and_no_standoff_skew_with_valid_far_front(self):
-        follower = WallFollower(WallFollowConfig())
-
-        command = follower.compute_follow_command(front=2.3, right=0.5, previously_holding=True)
-
-        assert command.yaw_rate_deg_s == pytest.approx(0.0)
-        assert command.vx == pytest.approx(command.vy)
-        assert command.holding is True
-
-    def test_yaw_zero_and_no_standoff_skew_with_missing_front(self):
-        follower = WallFollower(WallFollowConfig())
-
-        command = follower.compute_follow_command(front=None, right=0.40, previously_holding=True)
-
-        assert command.yaw_rate_deg_s == pytest.approx(0.0)
-        assert command.vx == pytest.approx(command.vy)
-        assert command.holding is True
-
-    def test_v_follow_still_ramps_via_slew_limit(self):
-        """The front-proximity-brake/slew pipeline for v_follow is
-        untouched -- front_scale is naturally 1.0 (nothing detected ahead),
-        so v_follow ramps toward follow_velocity_m_s at the normal slew
-        rate, same as any other fully-open front reading (mirrors
-        TestForwardPushSlewLimit).
-        """
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-        max_step = (cfg.follow_velocity_m_s / _REACTION_S) * _POLL_INTERVAL_S
-
-        command = follower.compute_follow_command(
-            front=None, right=0.40, previous_v_follow=0.0, previously_holding=True
-        )
-
-        assert command.v_follow == pytest.approx(max_step)
-        assert command.v_follow < cfg.follow_velocity_m_s
-
-    def test_holds_when_right_is_stable_or_decreasing(self):
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-
-        stable = follower.compute_follow_command(
-            front=2.3, right=0.40, previous_right=0.40, previously_holding=True
-        )
-        decreasing = follower.compute_follow_command(
-            front=2.3, right=0.35, previous_right=0.40, previously_holding=True
-        )
-
-        assert stable.holding is True
-        assert decreasing.holding is True
-
-
-class TestHoldingTransitionsToReacquiringWhenRightRecedes:
-    def test_transitions_once_right_recedes_past_hysteresis(self):
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-        previous_right = 0.40
-
-        command = follower.compute_follow_command(
-            front=2.3,
-            right=previous_right + cfg.right_increasing_hysteresis_m + 0.01,
-            previous_right=previous_right,
-            previously_holding=True,
-        )
-
-        assert command.holding is False
-        assert command.reacquiring is True
-        assert command.yaw_rate_deg_s == pytest.approx(-cfg.max_yaw_rate_deg_s)
-
-    def test_standoff_correction_resumes_once_reacquiring(self):
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-        previous_right = 0.40
-        right = previous_right + cfg.right_increasing_hysteresis_m + 0.01
-
-        command = follower.compute_follow_command(
-            front=2.3, right=right, previous_right=previous_right, previously_holding=True
-        )
-        unbraked_vx, unbraked_vy = _unbraked_vx_vy(cfg, 2.3, right)
-        speed = math.hypot(unbraked_vx, unbraked_vy)
-        if speed > cfg.max_velocity_m_s and speed > 0.0:
-            scale = cfg.max_velocity_m_s / speed
-            unbraked_vx *= scale
-            unbraked_vy *= scale
-
-        assert command.vx == pytest.approx(unbraked_vx)
-        assert command.vy == pytest.approx(unbraked_vy)
-
-    def test_exactly_at_hysteresis_boundary_still_holds(self):
-        """The comparison is strictly greater-than -- exactly
-        right_increasing_hysteresis_m above previous_right must NOT count
-        as receding yet.
-        """
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-        previous_right = 0.40
-
-        command = follower.compute_follow_command(
-            front=2.3,
-            right=previous_right + cfg.right_increasing_hysteresis_m,
-            previous_right=previous_right,
-            previously_holding=True,
-        )
-
-        assert command.holding is True
-        assert command.reacquiring is False
-
-
-class TestReacquiringLatchesUntilConverged:
-    """right_receding must not be recomputed from a single cycle's delta
-    alone once reacquiring has started (a real-world gradual/noisy right
-    increase would otherwise chatter the loop between holding and yawing
-    hard, cycle to cycle -- the original code-review finding this class
-    guards against). Once previously_reacquiring is True, the loop stays in
-    reacquire mode regardless of the current cycle's delta, exiting only
-    once heading has genuinely converged (yaw no longer saturated) -- not
-    merely because front happens to no longer be None, which is what let
-    the 15:17 incident's valid-but-far front slip through the old gate.
-    """
-
-    def test_stays_reacquiring_even_when_this_cycles_delta_is_small(self):
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-
-        command = follower.compute_follow_command(
-            front=2.3,
-            right=0.41,  # +0.01 versus previous_right -- below the 0.05 hysteresis
-            previous_right=0.40,
-            previously_reacquiring=True,
-        )
-
-        assert command.reacquiring is True
-        assert command.yaw_rate_deg_s == pytest.approx(-cfg.max_yaw_rate_deg_s)
-
-    def test_stays_reacquiring_even_when_right_momentarily_decreases(self):
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-
-        command = follower.compute_follow_command(
-            front=2.3,
-            right=0.35,  # decreased versus previous_right -- still latched
-            previous_right=0.40,
-            previously_reacquiring=True,
-        )
-
-        assert command.reacquiring is True
-        assert command.yaw_rate_deg_s == pytest.approx(-cfg.max_yaw_rate_deg_s)
-
-    def test_exits_to_normal_once_heading_converges(self):
-        """Once front and right are back in a normal following relationship
-        (heading_error small enough that yaw is no longer saturated), the
-        loop exits reacquiring entirely and resumes ordinary following --
-        this is the fix for the 15:17 incident: exit is keyed off actual
-        convergence, not merely "front is no longer None".
-        """
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-
-        command = follower.compute_follow_command(
-            front=0.60, right=0.55, previously_reacquiring=True
-        )
-
-        assert command.holding is False
-        assert command.reacquiring is False
-        # heading_error = 0.05 -> yaw_rate = -120 * 0.05 = -6, not zeroed.
-        assert command.yaw_rate_deg_s == pytest.approx(-6.0)
-
-    def test_previously_reacquiring_false_does_not_latch_on_its_own(self):
-        """Sanity check: without previously_reacquiring=True, a small delta
-        must not itself trigger reacquiring -- the latch only kicks in once
-        actually set, not implicitly.
-        """
-        cfg = WallFollowConfig()
-        follower = WallFollower(cfg)
-
-        command = follower.compute_follow_command(
-            front=2.3, right=0.41, previous_right=0.40, previously_holding=True
-        )
-
-        assert command.reacquiring is False
-        assert command.holding is True
+    def test_decrease_is_not_a_spike(self):
+        assert is_spike(current=0.3, previous=1.0, threshold_m=0.5) is False
 
 
 class TestRightMissingStillMeansWallLost:
@@ -901,6 +665,329 @@ class TestAlignToWall:
 
 
 # ---------------------------------------------------------------------------
+# Outward-corner negotiation - the four phase methods. See the module
+# docstring for the geometry and _negotiate_outer_corner() for how they
+# chain together.
+# ---------------------------------------------------------------------------
+
+
+class TestRotatePerpendicularToWall:
+    def test_calls_turn_left_45_once(self, mocker):
+        follower = WallFollower(WallFollowConfig())
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=0.60, right=0.60)
+
+        result = follower._rotate_perpendicular_to_wall(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is True
+        mock_mc.turn_left.assert_called_once_with(_CORNER_ROTATION_DEG)
+
+    def test_clears_flight_state_before_turning(self, mocker):
+        state = FlightState(current_velocity_m_s=0.15)
+        state.set_direction("forward_left")
+        follower = WallFollower(WallFollowConfig(), flight_state=state)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=0.60, right=0.60)
+
+        follower._rotate_perpendicular_to_wall(mock_mc, mock_ranger, should_abort=None)
+
+        assert state.get_direction() is None
+        assert state.get_velocity() == pytest.approx(0.0)
+
+    def test_returns_false_and_skips_turn_when_should_abort(self, mocker):
+        follower = WallFollower(WallFollowConfig())
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+
+        result = follower._rotate_perpendicular_to_wall(
+            mock_mc, mock_ranger, should_abort=lambda: True
+        )
+
+        assert result is False
+        mock_mc.turn_left.assert_not_called()
+        mock_mc.stop.assert_not_called()
+
+    def test_returns_false_and_skips_turn_when_too_close(self, mocker):
+        follower = WallFollower(WallFollowConfig(abort_distance_m=0.25))
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=0.10, right=0.60)
+
+        result = follower._rotate_perpendicular_to_wall(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is False
+        mock_mc.turn_left.assert_not_called()
+        mock_mc.stop.assert_not_called()
+
+
+class TestAdvancePastCornerApex:
+    def test_flies_straight_until_right_spikes(self, mocker):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        baseline_right = 0.55
+        spiked_right = baseline_right + cfg.spike_threshold_m + 0.5
+        readings_sequence = [
+            _readings(front=1.0, right=baseline_right),
+            _readings(front=1.0, right=baseline_right),
+            _readings(front=1.0, right=spiked_right),
+        ]
+        mock_ranger.get_readings.side_effect = readings_sequence
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        result = follower._advance_past_corner_apex(
+            mock_mc, mock_ranger, should_abort=None, baseline_right=baseline_right
+        )
+
+        assert result is True
+        calls = mock_mc.start_linear_motion.call_args_list
+        assert len(calls) == 2  # cycles 1 and 2, not the spiking cycle 3
+        for call in calls:
+            assert call.args == (cfg.follow_velocity_m_s, 0.0, 0.0)
+            assert call.kwargs["rate_yaw"] == pytest.approx(0.0)
+
+    def test_right_already_spiked_returns_true_with_no_motion(self, mocker):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        baseline_right = 0.55
+        mock_ranger.get_readings.return_value = _readings(
+            front=1.0, right=baseline_right + cfg.spike_threshold_m + 0.5
+        )
+
+        result = follower._advance_past_corner_apex(
+            mock_mc, mock_ranger, should_abort=None, baseline_right=baseline_right
+        )
+
+        assert result is True
+        mock_mc.start_linear_motion.assert_not_called()
+
+    def test_distance_cap_returns_false(self, mocker):
+        cfg = WallFollowConfig(max_corner_advance_m=0.03, follow_velocity_m_s=0.15)
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=1.0, right=0.55)  # never spikes
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        result = follower._advance_past_corner_apex(
+            mock_mc, mock_ranger, should_abort=None, baseline_right=0.55
+        )
+
+        assert result is False
+
+    def test_returns_false_when_too_close(self, mocker):
+        follower = WallFollower(WallFollowConfig(abort_distance_m=0.25))
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=0.10, right=0.55)
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        result = follower._advance_past_corner_apex(
+            mock_mc, mock_ranger, should_abort=None, baseline_right=0.55
+        )
+
+        assert result is False
+        mock_mc.stop.assert_not_called()
+
+    def test_returns_false_when_should_abort(self, mocker):
+        follower = WallFollower(WallFollowConfig())
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=1.0, right=0.55)
+
+        result = follower._advance_past_corner_apex(
+            mock_mc, mock_ranger, should_abort=lambda: True, baseline_right=0.55
+        )
+
+        assert result is False
+        mock_mc.stop.assert_not_called()
+
+    def test_sets_flight_state_forward_at_follow_velocity(self, mocker):
+        state = FlightState()
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg, flight_state=state)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(
+            front=1.0, right=0.55 + cfg.spike_threshold_m + 0.5
+        )
+
+        follower._advance_past_corner_apex(
+            mock_mc, mock_ranger, should_abort=None, baseline_right=0.55
+        )
+
+        assert state.get_direction() == "forward"
+        assert state.get_velocity() == pytest.approx(cfg.follow_velocity_m_s)
+
+
+class TestArcAroundCorner:
+    def test_commanded_yaw_rate_matches_radius_formula(self, mocker):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.side_effect = [
+            _readings(front=2.0, right=1.0),
+            _readings(front=cfg.target_wall_distance_m, right=1.0),
+        ]
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        radius = cfg.target_wall_distance_m / _SQRT2
+        expected_yaw = -math.degrees(cfg.follow_velocity_m_s / radius)
+        call = mock_mc.start_linear_motion.call_args_list[0]
+        assert call.args == (cfg.follow_velocity_m_s, 0.0, 0.0)
+        assert call.kwargs["rate_yaw"] == pytest.approx(expected_yaw)
+        assert expected_yaw < 0.0
+
+    def test_continues_while_front_missing_or_far(self, mocker):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        readings_sequence = [
+            _readings(front=None, right=1.0),
+            _readings(front=2.0, right=1.0),
+            _readings(front=cfg.target_wall_distance_m, right=1.0),
+        ]
+        mock_ranger.get_readings.side_effect = readings_sequence
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        result = follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is True
+        assert mock_mc.start_linear_motion.call_count == 2
+
+    def test_returns_true_once_front_at_or_under_target(self, mocker):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(
+            front=cfg.target_wall_distance_m, right=1.0
+        )
+
+        result = follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is True
+        mock_mc.start_linear_motion.assert_not_called()
+
+    def test_arc_angle_cap_returns_false(self, mocker):
+        cfg = WallFollowConfig(max_corner_arc_deg=1.0)
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=2.0, right=1.0)  # never close
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        result = follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is False
+
+    def test_returns_false_when_too_close(self, mocker):
+        follower = WallFollower(WallFollowConfig(abort_distance_m=0.25))
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=2.0, left=0.10, right=1.0)
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        result = follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is False
+        mock_mc.stop.assert_not_called()
+
+    def test_returns_false_when_should_abort(self, mocker):
+        follower = WallFollower(WallFollowConfig())
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=2.0, right=1.0)
+
+        result = follower._arc_around_corner(mock_mc, mock_ranger, should_abort=lambda: True)
+
+        assert result is False
+        mock_mc.stop.assert_not_called()
+
+    def test_yaw_rate_is_clamped_to_max_yaw_rate(self, mocker):
+        """Regression: at a follow_velocity_m_s/target_wall_distance_m
+        ratio large enough that the radius-derived yaw rate would exceed
+        max_yaw_rate_deg_s, the arc must still respect the configured hard
+        limit -- every other yaw command in this module does (see
+        compute_follow_command()).
+        """
+        cfg = WallFollowConfig(follow_velocity_m_s=0.50, target_wall_distance_m=0.30)
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.side_effect = [
+            _readings(front=2.0, right=1.0),
+            _readings(front=cfg.target_wall_distance_m, right=1.0),
+        ]
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        radius = cfg.target_wall_distance_m / _SQRT2
+        unclamped_yaw = math.degrees(cfg.follow_velocity_m_s / radius)
+        assert unclamped_yaw > cfg.max_yaw_rate_deg_s  # sanity check on the test setup
+
+        follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        call = mock_mc.start_linear_motion.call_args_list[0]
+        assert call.kwargs["rate_yaw"] == pytest.approx(-cfg.max_yaw_rate_deg_s)
+
+
+class TestNegotiateOuterCorner:
+    def test_calls_phases_in_order_when_all_succeed(self, mocker):
+        follower = WallFollower(WallFollowConfig())
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        should_abort = mocker.MagicMock(return_value=False)
+        rotate = mocker.patch.object(
+            WallFollower, "_rotate_perpendicular_to_wall", return_value=True
+        )
+        advance = mocker.patch.object(WallFollower, "_advance_past_corner_apex", return_value=True)
+        arc = mocker.patch.object(WallFollower, "_arc_around_corner", return_value=True)
+
+        result = follower._negotiate_outer_corner(mock_mc, mock_ranger, should_abort, 0.55)
+
+        assert result is True
+        rotate.assert_called_once()
+        advance.assert_called_once()
+        arc.assert_called_once()
+
+    def test_short_circuits_if_rotate_fails(self, mocker):
+        follower = WallFollower(WallFollowConfig())
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mocker.patch.object(WallFollower, "_rotate_perpendicular_to_wall", return_value=False)
+        advance = mocker.patch.object(WallFollower, "_advance_past_corner_apex")
+        arc = mocker.patch.object(WallFollower, "_arc_around_corner")
+
+        result = follower._negotiate_outer_corner(mock_mc, mock_ranger, None, 0.55)
+
+        assert result is False
+        advance.assert_not_called()
+        arc.assert_not_called()
+
+    def test_short_circuits_if_advance_fails(self, mocker):
+        follower = WallFollower(WallFollowConfig())
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mocker.patch.object(WallFollower, "_rotate_perpendicular_to_wall", return_value=True)
+        mocker.patch.object(WallFollower, "_advance_past_corner_apex", return_value=False)
+        arc = mocker.patch.object(WallFollower, "_arc_around_corner")
+
+        result = follower._negotiate_outer_corner(mock_mc, mock_ranger, None, 0.55)
+
+        assert result is False
+        arc.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # follow - the 10 Hz closed-loop control
 # ---------------------------------------------------------------------------
 
@@ -1117,88 +1204,176 @@ class TestFollow:
         # "clear" poll, it would equal unbraked_vx instead.
         assert vx_values[2] < unbraked_vx
 
-    def test_sustained_far_front_eventually_holds_then_reacquires(self, mocker):
-        """follow()-level regression for the 15:17 incident: front reading
-        valid but far (2.3 m) against a close, stable right (0.5 m) is the
-        actual scenario that caused the sustained ~90 degree rotation --
-        must eventually hold straight once saturated_cycles/holding state
-        is tracked and passed across follow()'s loop, not just in isolated
-        calls to compute_follow_command. yaw_saturation_hold_s is set small
-        here purely to keep the reading sequence short.
+    def test_qualifying_front_spike_triggers_corner_negotiation(self, mocker):
+        """follow()-level regression: a front spike confirmed for
+        spike_confirm_cycles, starting from a baseline outside the brake
+        zone, must hand off to _negotiate_outer_corner() with the last
+        valid right as baseline_right -- and once negotiation succeeds,
+        resume normal following without braking on the first cycle back
+        (previous_v_follow carried over as follow_velocity_m_s, not reset
+        to 0.0).
         """
-        cfg = WallFollowConfig(follow_duration_s=100.0, yaw_saturation_hold_s=0.15)
+        cfg = WallFollowConfig(follow_duration_s=100.0)
         follower = WallFollower(cfg)
         mock_mc = mocker.MagicMock()
         mock_ranger = mocker.MagicMock()
-        stable_right = 0.50
-        receding_right = stable_right + cfg.right_increasing_hysteresis_m + 0.01
+        baseline_front = cfg.target_wall_distance_m
+        baseline_right = 0.55
+        spiked_front = baseline_front + cfg.spike_threshold_m + 1.0
         readings_sequence = [
-            _readings(front=2.3, right=stable_right),  # cycle 1/2 saturated -> still normal
-            _readings(front=2.3, right=stable_right),  # cycle 2/2 saturated -> now holding
-            _readings(front=2.3, right=stable_right),  # right stable -> still holding
-            _readings(front=2.3, right=receding_right),  # right recedes -> reacquiring
+            _readings(front=baseline_front, right=baseline_right),
+            _readings(front=spiked_front, right=baseline_right),  # spike cycle 1
+            _readings(front=spiked_front, right=baseline_right),  # spike cycle 2 -> triggers
+            _readings(front=baseline_front, right=baseline_right),  # resumed normal flight
         ]
-        mock_ranger.get_readings.side_effect = readings_sequence
+        mock_ranger.get_readings.side_effect = _looping_side_effect(readings_sequence)
         mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+        mock_negotiate = mocker.patch.object(
+            WallFollower, "_negotiate_outer_corner", return_value=True
+        )
 
         call_count = {"n": 0}
 
         def should_abort() -> bool:
             call_count["n"] += 1
-            return call_count["n"] > len(readings_sequence) * 2
+            return call_count["n"] > 30
 
         follower.follow(mock_mc, mock_ranger, should_abort=should_abort)
 
-        yaw_values = [
-            call.kwargs["rate_yaw"] for call in mock_mc.start_linear_motion.call_args_list
-        ]
-        assert len(yaw_values) == len(readings_sequence)
-        assert yaw_values[0] == pytest.approx(-cfg.max_yaw_rate_deg_s)
-        assert yaw_values[1] == pytest.approx(0.0)
-        assert yaw_values[2] == pytest.approx(0.0)
-        assert yaw_values[3] == pytest.approx(-cfg.max_yaw_rate_deg_s)
+        mock_negotiate.assert_called_once_with(mock_mc, mock_ranger, should_abort, baseline_right)
+        vx_values = [call.args[0] for call in mock_mc.start_linear_motion.call_args_list]
+        unbraked_vx, _ = _unbraked_vx_vy(cfg, baseline_front, baseline_right)
+        assert vx_values[2] == pytest.approx(unbraked_vx)
 
-    def test_reacquiring_exits_to_normal_once_heading_converges(self, mocker):
-        """follow()-level regression: once reacquiring and front is
-        actually reacquired (heading_error small again, no longer
-        saturated), the loop must resume ordinary following -- this is the
-        actual fix for the 15:17 incident, where the old front-is-no-
-        longer-None exit criterion let a still-runaway heading slip through
-        because front had briefly read a real, valid, but unhelpful value.
+    def test_spike_from_inside_brake_zone_does_not_trigger_negotiation(self, mocker):
+        """Reproduces the 12:30 log's inside-corner flicker shape: front
+        swings from within the brake zone (0.26-0.38 m) out to 2+ m and
+        back. This must not be mistaken for an outward corner -- see the
+        module docstring's brake-zone discriminator.
         """
-        cfg = WallFollowConfig(follow_duration_s=100.0, yaw_saturation_hold_s=0.15)
+        cfg = WallFollowConfig(follow_duration_s=100.0)
         follower = WallFollower(cfg)
         mock_mc = mocker.MagicMock()
         mock_ranger = mocker.MagicMock()
-        stable_right = 0.50
-        receding_right = stable_right + cfg.right_increasing_hysteresis_m + 0.01
+        right = cfg.target_wall_distance_m
+        inside_brake_zone_front = 0.30
+        spiked_front = inside_brake_zone_front + cfg.spike_threshold_m + 1.0
         readings_sequence = [
-            _readings(front=2.3, right=stable_right),  # saturated 1/2 -> still normal
-            _readings(front=2.3, right=stable_right),  # saturated 2/2 -> now holding
-            _readings(front=2.3, right=receding_right),  # right recedes -> reacquiring
-            _readings(front=0.60, right=0.55),  # front reacquired -> converged, exit
+            _readings(front=inside_brake_zone_front, right=right),
+            _readings(front=spiked_front, right=right),
+            _readings(front=spiked_front, right=right),
+            _readings(front=inside_brake_zone_front, right=right),
         ]
-        mock_ranger.get_readings.side_effect = readings_sequence
+        mock_ranger.get_readings.side_effect = _looping_side_effect(readings_sequence)
         mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+        mock_negotiate = mocker.patch.object(WallFollower, "_negotiate_outer_corner")
 
         call_count = {"n": 0}
 
         def should_abort() -> bool:
             call_count["n"] += 1
-            return call_count["n"] > len(readings_sequence) * 2
+            return call_count["n"] > 80
 
         follower.follow(mock_mc, mock_ranger, should_abort=should_abort)
 
-        yaw_values = [
-            call.kwargs["rate_yaw"] for call in mock_mc.start_linear_motion.call_args_list
+        mock_negotiate.assert_not_called()
+
+    def test_spike_that_does_not_persist_does_not_trigger_negotiation(self, mocker):
+        cfg = WallFollowConfig(follow_duration_s=100.0)
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        baseline_front = cfg.target_wall_distance_m
+        right = 0.55
+        spiked_front = baseline_front + cfg.spike_threshold_m + 1.0
+        readings_sequence = [
+            _readings(front=baseline_front, right=right),
+            _readings(front=spiked_front, right=right),  # one spiking cycle...
+            _readings(front=baseline_front, right=right),  # ...then reverts before confirming
         ]
-        assert len(yaw_values) == len(readings_sequence)
-        assert yaw_values[0] == pytest.approx(-cfg.max_yaw_rate_deg_s)
-        assert yaw_values[1] == pytest.approx(0.0)
-        assert yaw_values[2] == pytest.approx(-cfg.max_yaw_rate_deg_s)
-        # heading_error = 0.60 - 0.55 = 0.05 -> yaw_rate = -120 * 0.05 = -6.0,
-        # not clamped and not zeroed -- ordinary following has resumed.
-        assert yaw_values[3] == pytest.approx(-6.0)
+        mock_ranger.get_readings.side_effect = _looping_side_effect(readings_sequence)
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+        mock_negotiate = mocker.patch.object(WallFollower, "_negotiate_outer_corner")
+
+        call_count = {"n": 0}
+
+        def should_abort() -> bool:
+            call_count["n"] += 1
+            return call_count["n"] > 80
+
+        follower.follow(mock_mc, mock_ranger, should_abort=should_abort)
+
+        mock_negotiate.assert_not_called()
+
+    def test_failed_negotiation_stops_flight(self, mocker):
+        cfg = WallFollowConfig(follow_duration_s=100.0)
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        baseline_front = cfg.target_wall_distance_m
+        right = 0.55
+        spiked_front = baseline_front + cfg.spike_threshold_m + 1.0
+        readings_sequence = [
+            _readings(front=baseline_front, right=right),
+            _readings(front=spiked_front, right=right),
+            _readings(front=spiked_front, right=right),
+        ]
+        mock_ranger.get_readings.side_effect = readings_sequence
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+        mocker.patch.object(WallFollower, "_negotiate_outer_corner", return_value=False)
+
+        follower.follow(mock_mc, mock_ranger, should_abort=None)
+
+        mock_mc.stop.assert_called_once()
+
+    def test_second_negotiation_gets_a_non_none_baseline_right(self, mocker):
+        """Regression: previous_right is reset after a successful
+        negotiation since it's stale, but must not be reset to None -- if
+        a second corner is detected before a normal cycle re-validates
+        right (e.g. right stays unreadable right after resuming),
+        _advance_past_corner_apex() would be seeded with baseline_right=
+        None and could never detect the lateral-edge spike at all
+        (is_spike() only ever returns True against a valid baseline),
+        failing the maneuver via its distance cap instead of negotiating
+        the corner. Seed with target_wall_distance_m instead -- a
+        reasonable estimate matching phase 3's own exit condition.
+        """
+        cfg = WallFollowConfig(follow_duration_s=100.0)
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        baseline_front = cfg.target_wall_distance_m
+        spiked_front = baseline_front + cfg.spike_threshold_m + 1.0
+        readings_sequence = [
+            _readings(front=baseline_front, right=0.55),
+            _readings(front=spiked_front, right=0.55),  # spike 1/2
+            _readings(front=spiked_front, right=0.55),  # spike 2/2 -> negotiation #1
+            # Right stays unreadable right after resuming, but front
+            # returns to normal then spikes again -- previous_front gets
+            # repopulated (enabling a 2nd spike candidate) while
+            # previous_right does not.
+            _readings(front=baseline_front, right=None),
+            _readings(front=spiked_front, right=None),  # spike 1/2
+            _readings(front=spiked_front, right=None),  # spike 2/2 -> negotiation #2
+        ]
+        mock_ranger.get_readings.side_effect = _looping_side_effect(readings_sequence)
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+        mock_negotiate = mocker.patch.object(
+            WallFollower, "_negotiate_outer_corner", return_value=True
+        )
+
+        call_count = {"n": 0}
+
+        def should_abort() -> bool:
+            call_count["n"] += 1
+            return call_count["n"] > 60
+
+        follower.follow(mock_mc, mock_ranger, should_abort=should_abort)
+
+        assert mock_negotiate.call_count == 2
+        second_call_baseline_right = mock_negotiate.call_args_list[1].args[3]
+        assert second_call_baseline_right is not None
+        assert second_call_baseline_right == pytest.approx(cfg.target_wall_distance_m)
 
     def test_stop_called_exactly_once_on_normal_abort(self, mocker):
         follower = WallFollower(WallFollowConfig())

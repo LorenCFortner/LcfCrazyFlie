@@ -12,6 +12,7 @@ import pytest
 from Crazyflie.decks.multi_ranger import MultiRangerReadings
 from Crazyflie.safety.collision_monitor import (
     _DIAGONAL_BASE_M,
+    _FROZEN_TELEMETRY_TIMEOUT_S,
     _REACTION_S,
     _SENSOR_OFFSET_M,
     _SIDE_CLEARANCE_M,
@@ -324,6 +325,59 @@ class TestGetLatestReadings:
         monitor = CollisionMonitor(mock_scf, event_queue)
         assert monitor.get_latest_readings(max_age_s=1.0) is None
 
+    def test_first_poll_sets_the_timestamp(self, monitor_with_ranger):
+        monitor, mock_ranger, _ = monitor_with_ranger
+        mock_ranger.get_readings.return_value = _readings(front=0.42)
+        assert monitor._latest_readings_time == 0.0
+
+        monitor._run_once()
+
+        assert monitor._latest_readings_time > 0.0
+
+    def test_identical_readings_do_not_advance_the_timestamp(self, monitor_with_ranger, mocker):
+        """Regression for scripts/logs/right_wall_follow.log's 18:31 run: a
+        stalled telemetry feed (a radio/firmware hiccup where the same
+        packet keeps getting re-delivered) must not look perpetually
+        "fresh" to a max_age_s caller just because a poll cycle keeps
+        completing on schedule -- the timestamp must only advance when the
+        underlying value actually changes.
+        """
+        monitor, mock_ranger, _ = monitor_with_ranger
+        frozen = _readings(front=0.42)
+        mock_ranger.get_readings.return_value = frozen
+
+        monitor._run_once()
+        time_after_first_poll = monitor._latest_readings_time
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic",
+            return_value=time_after_first_poll + 10.0,
+        )
+        monitor._run_once()  # same frozen reading, "polled" again 10 s later
+
+        assert monitor._latest_readings_time == pytest.approx(time_after_first_poll)
+        assert monitor.get_latest_readings(max_age_s=0.5) is None
+
+    def test_changing_readings_keep_advancing_the_timestamp(self, monitor_with_ranger, mocker):
+        """Must not regress the existing behavior: a genuinely live feed
+        (a different reading each cycle) keeps the timestamp fresh
+        indefinitely.
+        """
+        monitor, mock_ranger, _ = monitor_with_ranger
+        mock_ranger.get_readings.return_value = _readings(front=0.42)
+        monitor._run_once()
+        first_time = monitor._latest_readings_time
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic",
+            return_value=first_time + 0.2,
+        )
+        mock_ranger.get_readings.return_value = _readings(front=0.41)  # different value
+        monitor._run_once()
+
+        assert monitor._latest_readings_time == pytest.approx(first_time + 0.2)
+        assert monitor.get_latest_readings(max_age_s=0.5) is not None
+
 
 class TestReset:
     def test_reset_clears_triggered_flag(self, monitor_with_ranger):
@@ -491,6 +545,238 @@ class TestRun:
         monitor._run()
 
         assert event_queue.qsize() == 1
+
+
+# ---------------------------------------------------------------------------
+# Frozen-telemetry detection - a stalled radio/firmware feed keeps
+# re-delivering the same reading while the poll loop itself keeps ticking
+# on schedule. Reproduces scripts/logs/right_wall_follow.log's 18:31 run:
+# front/back/left/right/up AND link_quality all froze bit-identical for
+# ~2 s while the outward-corner arc phase (a WallFollower consumer of
+# get_latest_readings()) kept waiting on them to change. See
+# _check_frozen_telemetry() and the module docstring.
+# ---------------------------------------------------------------------------
+
+
+class TestCheckFrozenTelemetry:
+    def test_returns_false_while_readings_keep_changing(self, mock_scf, event_queue):
+        monitor = CollisionMonitor(mock_scf, event_queue)
+
+        assert monitor._check_frozen_telemetry(_readings(front=1.0)) is False
+        assert monitor._check_frozen_telemetry(_readings(front=0.9)) is False
+        assert monitor._check_frozen_telemetry(_readings(front=0.8)) is False
+
+    def test_returns_false_before_timeout_elapses(self, mock_scf, event_queue, mocker):
+        monitor = CollisionMonitor(mock_scf, event_queue)
+        readings = _readings(front=1.0)
+        mocker.patch("Crazyflie.safety.collision_monitor.time.monotonic", return_value=100.0)
+        monitor._check_frozen_telemetry(readings)
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic",
+            return_value=100.0 + _FROZEN_TELEMETRY_TIMEOUT_S - 0.01,
+        )
+
+        assert monitor._check_frozen_telemetry(readings) is False
+
+    def test_returns_true_once_timeout_elapses(self, mock_scf, event_queue, mocker):
+        monitor = CollisionMonitor(mock_scf, event_queue)
+        readings = _readings(front=1.0)
+        mocker.patch("Crazyflie.safety.collision_monitor.time.monotonic", return_value=100.0)
+        monitor._check_frozen_telemetry(readings)
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic",
+            return_value=100.0 + _FROZEN_TELEMETRY_TIMEOUT_S,
+        )
+
+        assert monitor._check_frozen_telemetry(readings) is True
+
+    def test_a_changing_reading_resets_the_clock(self, mock_scf, event_queue, mocker):
+        monitor = CollisionMonitor(mock_scf, event_queue)
+        mocker.patch("Crazyflie.safety.collision_monitor.time.monotonic", return_value=100.0)
+        monitor._check_frozen_telemetry(_readings(front=1.0))  # frozen_since = 100.0
+
+        just_before_timeout = 100.0 + _FROZEN_TELEMETRY_TIMEOUT_S - 0.01
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic", return_value=just_before_timeout
+        )
+        monitor._check_frozen_telemetry(_readings(front=0.5))  # different -> resets the clock
+
+        # Same as the differing reading again, at what would have been the
+        # ORIGINAL timeout instant -- must not have timed out, since the
+        # clock restarted at just_before_timeout, not at 100.0.
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic",
+            return_value=100.0 + _FROZEN_TELEMETRY_TIMEOUT_S,
+        )
+
+        assert monitor._check_frozen_telemetry(_readings(front=0.5)) is False
+
+
+class TestFrozenTelemetryRunOnce:
+    def test_frozen_readings_trigger_after_timeout_with_flight_state(
+        self, mock_scf, event_queue, mocker
+    ):
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        frozen = _readings(front=1.5, right=1.5)  # well outside any real threshold
+        mock_ranger.get_readings.return_value = frozen
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=0.2)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+        time = {"t": 100.0}
+
+        def fake_monotonic() -> float:
+            return time["t"]
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic", side_effect=fake_monotonic
+        )
+
+        monitor._run_once()  # establishes the frozen baseline
+        assert monitor.is_triggered() is False
+
+        time["t"] += _FROZEN_TELEMETRY_TIMEOUT_S
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+        assert event_queue.get_nowait() == "COLLISION"
+
+    def test_frozen_readings_trigger_after_timeout_without_flight_state(
+        self, mock_scf, event_queue, mocker
+    ):
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mock_ranger.is_obstacle_within.return_value = False
+        frozen = _readings(front=1.5, right=1.5)
+        mock_ranger.get_readings.return_value = frozen
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        monitor = CollisionMonitor(mock_scf, event_queue)
+
+        time = {"t": 100.0}
+
+        def fake_monotonic() -> float:
+            return time["t"]
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic", side_effect=fake_monotonic
+        )
+
+        monitor._run_once()
+        assert monitor.is_triggered() is False
+
+        time["t"] += _FROZEN_TELEMETRY_TIMEOUT_S
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+        assert event_queue.get_nowait() == "COLLISION"
+
+    def test_logs_a_distinct_frozen_telemetry_message(self, mock_scf, event_queue, mocker, caplog):
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        frozen = _readings(front=1.5, right=1.5)
+        mock_ranger.get_readings.return_value = frozen
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=0.2)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+        time = {"t": 100.0}
+
+        def fake_monotonic() -> float:
+            return time["t"]
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic", side_effect=fake_monotonic
+        )
+
+        with caplog.at_level("CRITICAL", logger="Crazyflie.safety.collision_monitor"):
+            monitor._run_once()
+            time["t"] += _FROZEN_TELEMETRY_TIMEOUT_S
+            monitor._run_once()
+
+        assert "frozen" in caplog.text.lower()
+
+    def test_real_obstacle_still_triggers_without_waiting_for_freeze_timeout(
+        self, monitor_with_ranger
+    ):
+        monitor, mock_ranger, eq = monitor_with_ranger
+        mock_ranger.is_obstacle_within.return_value = True
+        mock_ranger.get_readings.return_value = _readings(front=0.05)
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+        assert eq.get_nowait() == "COLLISION"
+
+    def test_changing_but_always_safe_readings_never_trigger(self, mock_scf, event_queue, mocker):
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=0.2)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+        time = {"t": 100.0}
+
+        def fake_monotonic() -> float:
+            return time["t"]
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic", side_effect=fake_monotonic
+        )
+
+        for i in range(20):
+            mock_ranger.get_readings.return_value = _readings(front=1.5 + i * 0.001, right=1.5)
+            time["t"] += 0.1
+            monitor._run_once()
+
+        assert monitor.is_triggered() is False
+
+
+class TestFrozenTelemetryRun:
+    def test_frozen_readings_trigger_the_background_loop_after_timeout(
+        self, mock_scf, event_queue, mocker
+    ):
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.__enter__ = mocker.MagicMock(return_value=mock_ranger)
+        mock_ranger.__exit__ = mocker.MagicMock(return_value=False)
+        frozen = _readings(front=1.5, right=1.5)
+        mock_ranger.get_readings.return_value = frozen
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.MultiRangerDeck", return_value=mock_ranger
+        )
+        state = FlightState(current_velocity_m_s=0.2)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+        time = {"t": 100.0}
+
+        def fake_sleep(*_args: object, **_kwargs: object) -> None:
+            time["t"] += _FROZEN_TELEMETRY_TIMEOUT_S
+            if monitor.is_triggered():
+                monitor._stop_requested = True
+
+        mocker.patch(
+            "Crazyflie.safety.collision_monitor.time.monotonic", side_effect=lambda: time["t"]
+        )
+        mocker.patch("Crazyflie.safety.collision_monitor.time.sleep", side_effect=fake_sleep)
+
+        monitor._run()
+
+        assert monitor.is_triggered() is True
+        assert event_queue.get_nowait() == "COLLISION"
 
 
 # ---------------------------------------------------------------------------

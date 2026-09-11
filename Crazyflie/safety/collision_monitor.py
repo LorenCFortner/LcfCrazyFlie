@@ -35,6 +35,32 @@ used, preserving the original hardcoded behavior.
 The monitor only fires once per flight - call reset() or create a new
 CollisionMonitor for each new flight.
 
+Frozen-telemetry detection: a radio/firmware hiccup can leave cflib
+re-delivering the same last-known Multi-ranger packet indefinitely while
+the poll loop itself keeps ticking on schedule - observed on hardware (see
+scripts/logs/right_wall_follow.log, 18:31 run): front/back/left/right/up
+*and* link_quality all froze bit-identical for ~2 s, while WallFollower's
+outward-corner arc phase (a get_latest_readings() consumer) kept waiting
+on them to change, exhausting its bounded arc-angle budget and landing
+even though the drone had, per hardware observation, already reached the
+new wall. Two independent protections address this:
+  1. get_latest_readings()'s staleness timestamp only advances when a poll
+     actually returns a *different* reading from the previous one (see
+     _update_latest_readings) - a frozen feed simply stops advancing it,
+     so any caller using max_age_s (WallFollower's ranger adapter already
+     does, at 0.5 s) automatically starts seeing None once the freeze
+     exceeds that duration, with no consumer-side changes needed.
+  2. This monitor's own detection loop (_run/_run_once) reads readings
+     directly every cycle, bypassing get_latest_readings() entirely, so it
+     has no staleness protection from (1) alone - a frozen feed would
+     otherwise leave collision detection itself blind for as long as the
+     freeze lasts, in any flight phase. _check_frozen_telemetry tracks how
+     long the raw readings have been identical across consecutive polls;
+     once that reaches _FROZEN_TELEMETRY_TIMEOUT_S, the monitor treats it
+     as "proximity data can no longer be trusted" and calls the same
+     _trigger() a real obstacle would, landing the flight rather than
+     continuing to fly on stale data it can no longer verify.
+
 Example:
     >>> event_queue = queue.Queue()
     >>> state = FlightState()
@@ -110,6 +136,18 @@ _MIN_AVOID_VELOCITY_M_S: float = 0.3
 # Fixed blade-clearance for non-flight-direction sensors.
 # Blade tips are ~5 cm from each sensor face; 5 cm × 2 sides = 10 cm minimum.
 _SIDE_CLEARANCE_M: float = 0.10
+
+# How long the raw Multi-ranger readings may stay bit-identical across
+# consecutive polls before _check_frozen_telemetry treats the feed as
+# stalled rather than genuinely unchanging - 10 consecutive polls at the
+# 10 Hz poll rate. Long enough that a coincidentally-static real hover
+# reading pair is implausible (readings are meters with mm precision, so
+# real sensor noise almost always shows a tiny fluctuation cycle to cycle);
+# short enough to bound how long collision detection can be blind, in the
+# same family as this project's other "how long can we tolerate degraded
+# info" timeouts (e.g. WallFollower's wall_lost_timeout_s). Not yet tuned
+# against a second captured freeze incident - see the module docstring.
+_FROZEN_TELEMETRY_TIMEOUT_S: float = 1.0
 
 # Maps SafeFlightController command names to the MultiRangerReadings field
 # name(s) that count as "leading" (facing the direction of travel) for that
@@ -282,6 +320,11 @@ class CollisionMonitor:
 
     NOTE: When a FlightState IS provided, min_distance_m is ignored entirely.
     The dynamic formula takes over. Document this at each call site.
+
+    Also treats a frozen Multi-ranger feed (readings bit-identical across
+    consecutive polls for _FROZEN_TELEMETRY_TIMEOUT_S) as a safety event and
+    triggers the same stop/avoidance/landing response as a real obstacle -
+    see the module docstring's frozen-telemetry section.
     """
 
     def __init__(
@@ -327,6 +370,13 @@ class CollisionMonitor:
         self._readings_lock = threading.Lock()
         self._latest_readings: MultiRangerReadings | None = None
         self._latest_readings_time: float = 0.0
+        # Frozen-telemetry tracking (see _check_frozen_telemetry) - only
+        # ever touched by the polling thread itself (_run/_run_once), so
+        # it needs no lock beyond that single-threaded-by-construction
+        # access, unlike _latest_readings above which get_latest_readings()
+        # exposes to other threads.
+        self._last_raw_readings: MultiRangerReadings | None = None
+        self._frozen_since: float | None = None
 
     def attach_motion_commander(self, mc: MotionCommander) -> None:
         """Attach a MotionCommander so movement stops immediately on collision.
@@ -378,6 +428,15 @@ class CollisionMonitor:
         one frozen snapshot instead of degrading to "no reading" the way it
         already handles a genuinely absent one.
 
+        The staleness clock this checks against only advances when a poll
+        actually returns a *different* reading than the previous one (see
+        _update_latest_readings) - a stalled telemetry feed that keeps
+        re-delivering the same packet (observed on hardware - see the
+        module docstring's frozen-telemetry section) is therefore
+        indistinguishable from a genuinely stalled poll thread from this
+        method's point of view: both simply stop advancing the timestamp,
+        so max_age_s catches either case the same way.
+
         Args:
             max_age_s: When given, treat a reading older than this many
                 seconds as stale and return None instead, even though a
@@ -387,8 +446,10 @@ class CollisionMonitor:
         Returns:
             The MultiRangerReadings from the most recently completed poll
             cycle, or None if no poll has completed yet (e.g. immediately
-            after start(), before the background thread's first cycle) or
-            the most recent poll is older than max_age_s.
+            after start(), before the background thread's first cycle),
+            the most recent *change* in reading is older than max_age_s, or
+            the feed has been frozen (see the module docstring) for longer
+            than max_age_s.
         """
         with self._readings_lock:
             if self._latest_readings is None:
@@ -523,6 +584,69 @@ class CollisionMonitor:
             self._recorder.record_ranger(
                 readings, self._effective_flight_direction(), self._effective_velocity(), context
             )
+
+    def _update_latest_readings(self, readings: MultiRangerReadings) -> None:
+        """Store readings as the latest poll for get_latest_readings().
+
+        Only refreshes _latest_readings_time when readings actually differs
+        from the previously stored value (or there is no previous value
+        yet - the first-ever poll). See get_latest_readings()'s and the
+        module's docstrings for why: a stalled telemetry feed that keeps
+        re-delivering the same packet must not look perpetually fresh to a
+        max_age_s caller just because a poll cycle keeps completing on
+        schedule.
+
+        Args:
+            readings: This cycle's fresh MultiRangerReadings.
+        """
+        with self._readings_lock:
+            if readings != self._latest_readings:
+                self._latest_readings_time = time.monotonic()
+            self._latest_readings = readings
+
+    def _check_frozen_telemetry(self, readings: MultiRangerReadings) -> bool:
+        """Return True once raw readings have been bit-identical to the
+        previous poll for _FROZEN_TELEMETRY_TIMEOUT_S continuously.
+
+        Unlike _update_latest_readings (which only protects callers reading
+        through get_latest_readings()), this protects the monitor's own
+        detection logic in _run()/_run_once(), which reads readings fresh
+        from the deck every cycle regardless - a stalled telemetry feed
+        would otherwise leave it evaluating the same stale-but-presumably-
+        safe values indefinitely, blind to a real obstacle for as long as
+        the freeze lasts. See the module docstring's frozen-telemetry
+        section for the hardware evidence this addresses.
+
+        Args:
+            readings: This cycle's fresh MultiRangerReadings.
+
+        Returns:
+            True if readings have been identical to the previous poll for
+            at least _FROZEN_TELEMETRY_TIMEOUT_S continuously.
+        """
+        now = time.monotonic()
+        frozen_since = self._frozen_since
+        if readings != self._last_raw_readings or frozen_since is None:
+            self._last_raw_readings = readings
+            self._frozen_since = now
+            return False
+        return now - frozen_since >= _FROZEN_TELEMETRY_TIMEOUT_S
+
+    def _handle_frozen_telemetry(self, ranger: MultiRangerDeck, frozen: bool) -> None:
+        """Trigger the collision response if telemetry is frozen and not already triggered.
+
+        Logs a distinct critical message before calling _trigger(), so a run
+        log clearly shows a safety stop was caused by frozen telemetry
+        rather than a real proximity trigger - see the module docstring's
+        frozen-telemetry section.
+
+        Args:
+            ranger: The open MultiRangerDeck, passed through to _trigger().
+            frozen: Result of this cycle's _check_frozen_telemetry() call.
+        """
+        if not self._triggered and frozen:
+            logger.critical("CollisionMonitor: telemetry frozen - readings unchanged.")
+            self._trigger(ranger)
 
     def _effective_diagonal_threshold(self) -> float:
         """Return the diagonal detection threshold for the current poll cycle.
@@ -790,10 +914,13 @@ class CollisionMonitor:
             if self._triggered:
                 return
             readings = ranger.get_readings()
-            with self._readings_lock:
-                self._latest_readings = readings
-                self._latest_readings_time = time.monotonic()
+            self._update_latest_readings(readings)
             self._record_ranger(readings)
+            # Called unconditionally every cycle (not as an elif branch in
+            # the detection chain below) so its internal clock always
+            # advances - an elif would let an earlier truthy branch (e.g.
+            # warn_detected) silently skip this call, stalling the clock.
+            frozen = self._check_frozen_telemetry(readings)
             if self._adaptive_corrector is not None and self._adaptive_corrector.is_correcting():
                 if self._any_below_blade_clearance(readings):
                     self._trigger(ranger)
@@ -807,6 +934,7 @@ class CollisionMonitor:
                     self._trigger(ranger)
                 elif not self._triggered and self._diagonal_detected(readings):
                     self._trigger(ranger)
+            self._handle_frozen_telemetry(ranger, frozen)
 
     def _run(self) -> None:
         """Background thread: polls Multi-ranger and reacts to obstacles.
@@ -819,10 +947,14 @@ class CollisionMonitor:
         with MultiRangerDeck(self._scf) as ranger:
             while not self._stop_requested:
                 readings = ranger.get_readings()
-                with self._readings_lock:
-                    self._latest_readings = readings
-                    self._latest_readings_time = time.monotonic()
+                self._update_latest_readings(readings)
                 self._record_ranger(readings)
+                # Called unconditionally every cycle (not as an elif branch
+                # in the detection chain below) so its internal clock always
+                # advances - an elif would let an earlier truthy branch
+                # (e.g. warn_detected) silently skip this call, stalling
+                # the clock.
+                frozen = self._check_frozen_telemetry(readings)
                 if (
                     self._adaptive_corrector is not None
                     and self._adaptive_corrector.is_correcting()
@@ -848,4 +980,5 @@ class CollisionMonitor:
                         self._trigger(ranger)
                     elif not self._triggered and self._warn_detected(readings):
                         _log_all_readings("Obstacle approaching", readings, threshold)
+                self._handle_frozen_telemetry(ranger, frozen)
                 time.sleep(_POLL_INTERVAL_S)

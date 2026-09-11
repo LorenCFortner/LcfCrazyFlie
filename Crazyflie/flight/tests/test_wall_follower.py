@@ -125,8 +125,15 @@ class TestComputeFollowCommand:
     def test_front_missing_or_invalid_substitutes_max_range(self, front):
         """A missing/invalid front means "nothing within MAX_RANGE_M" per
         Crazyflie.decks.multi_ranger's own convention -- not "unreadable,
-        stop". It substitutes MAX_RANGE_M and flows through the same
-        formula a real far reading would.
+        stop". It substitutes MAX_RANGE_M for the front-proximity-brake
+        pipeline (v_follow), which is identical whether front is missing or
+        a real reading exactly at MAX_RANGE_M -- that part is unaffected by
+        the missing-vs-valid distinction. The heading/standoff response
+        (vx, vy, yaw_rate_deg_s) is NOT expected to match a real MAX_RANGE_M
+        reading, though: "missing" additionally engages the
+        straight-line-hold/reacquire logic (see
+        TestFrontMissingHoldsStraightByDefault), which only applies when
+        front is actually missing, not merely numerically large.
         """
         follower = WallFollower(WallFollowConfig())
         right = 0.40
@@ -134,7 +141,7 @@ class TestComputeFollowCommand:
         command = follower.compute_follow_command(front=front, right=right)
         expected = follower.compute_follow_command(front=MAX_RANGE_M, right=right)
 
-        assert command == expected
+        assert command.v_follow == pytest.approx(expected.v_follow)
         assert command.wall_visible is True
 
     def test_is_a_pure_function_no_side_effects(self):
@@ -391,28 +398,132 @@ class TestForwardPushSlewLimit:
 # Reproduces scripts/logs/right_wall_follow.log's 08:58:12 run, where a
 # permanently-None front (right still valid) false-triggered
 # wall_lost_timeout_s.
+#
+# Default response while front is missing is now a straight-line hold, not
+# an unconditional aggressive yaw toward the substituted-MAX_RANGE_M
+# heading: at an outside/convex corner, chasing that heading and standoff
+# error pushed and yawed the drone too close to the old wall before it
+# could react, tripping CollisionMonitor (user-reported hardware behavior,
+# no captured log for this specific incident). Only once right is observed
+# increasing (the wall receding, meaning the corner's outer apex has been
+# passed) does the old substitution-based reacquire formula resume -- see
+# TestFrontMissingReacquiresWhenRightRecedes below.
 # ---------------------------------------------------------------------------
 
 
-class TestFrontOutOfRangeRotatesBackToWall:
-    def test_yaw_clamped_toward_wall_when_front_missing(self):
-        """The literal "rotate the sensor back toward the wall" requirement:
-        with front out of range and right at a typical following distance,
-        yaw is clamped to its maximum turning toward the wall.
+class TestFrontMissingHoldsStraightByDefault:
+    def test_yaw_holds_straight_with_no_trend_data(self):
+        """First cycle -- no previous_right given -- must not chase the
+        substituted-MAX_RANGE_M heading error; that was the old,
+        unconditional behavior this task narrows.
         """
         follower = WallFollower(WallFollowConfig())
 
         command = follower.compute_follow_command(front=None, right=0.40)
 
-        assert command.yaw_rate_deg_s == pytest.approx(-WallFollowConfig().max_yaw_rate_deg_s)
+        assert command.yaw_rate_deg_s == pytest.approx(0.0)
 
-    def test_front_brake_is_fully_open_when_front_missing(self):
-        """front_scale == 1.0 -- nothing detected ahead means no braking."""
+    def test_yaw_holds_straight_when_right_stable(self):
+        follower = WallFollower(WallFollowConfig())
+
+        command = follower.compute_follow_command(front=None, right=0.40, previous_right=0.40)
+
+        assert command.yaw_rate_deg_s == pytest.approx(0.0)
+
+    def test_yaw_holds_straight_when_right_decreasing(self):
+        follower = WallFollower(WallFollowConfig())
+
+        command = follower.compute_follow_command(front=None, right=0.35, previous_right=0.40)
+
+        assert command.yaw_rate_deg_s == pytest.approx(0.0)
+
+    def test_yaw_holds_straight_at_exactly_the_hysteresis_boundary(self):
+        """The comparison is strictly greater-than -- exactly
+        right_increasing_hysteresis_m above previous_right must NOT count
+        as receding yet.
+        """
         cfg = WallFollowConfig()
         follower = WallFollower(cfg)
-        right = 0.40
+        previous_right = 0.40
 
-        command = follower.compute_follow_command(front=None, right=right)
+        command = follower.compute_follow_command(
+            front=None,
+            right=previous_right + cfg.right_increasing_hysteresis_m,
+            previous_right=previous_right,
+        )
+
+        assert command.yaw_rate_deg_s == pytest.approx(0.0)
+
+    def test_vx_equals_vy_pure_diagonal_no_standoff_skew(self):
+        """Standoff correction is skipped while holding straight -- vx and
+        vy must be exactly equal (pure diagonal), not skewed toward or away
+        from the wall by the substituted MAX_RANGE_M standoff error.
+        """
+        follower = WallFollower(WallFollowConfig())
+
+        command = follower.compute_follow_command(front=None, right=0.40)
+
+        assert command.vx == pytest.approx(command.vy)
+
+    def test_v_follow_still_ramps_via_slew_limit(self):
+        """The front-proximity-brake/slew pipeline for v_follow is
+        untouched -- front_scale is naturally 1.0 (nothing detected ahead),
+        so v_follow ramps toward follow_velocity_m_s at the normal slew
+        rate, same as any other fully-open front reading (mirrors
+        TestForwardPushSlewLimit).
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        max_step = (cfg.follow_velocity_m_s / _REACTION_S) * _POLL_INTERVAL_S
+
+        command = follower.compute_follow_command(front=None, right=0.40, previous_v_follow=0.0)
+
+        assert command.v_follow == pytest.approx(max_step)
+        assert command.v_follow < cfg.follow_velocity_m_s
+
+    def test_v_follow_reaches_full_speed_once_ramped(self):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+
+        command = follower.compute_follow_command(
+            front=None, right=0.40, previous_v_follow=cfg.follow_velocity_m_s
+        )
+
+        assert command.v_follow == pytest.approx(cfg.follow_velocity_m_s)
+
+
+class TestFrontMissingReacquiresWhenRightRecedes:
+    def test_yaw_resumes_max_rate_toward_wall_once_right_recedes(self):
+        """Once right increases by more than right_increasing_hysteresis_m
+        versus the previous cycle, the old substitution-based reacquire
+        formula resumes -- yaw clamps hard toward the wall, same as the
+        original (pre-this-task) unconditional behavior.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        previous_right = 0.40
+
+        command = follower.compute_follow_command(
+            front=None,
+            right=previous_right + cfg.right_increasing_hysteresis_m + 0.01,
+            previous_right=previous_right,
+        )
+
+        assert command.yaw_rate_deg_s == pytest.approx(-cfg.max_yaw_rate_deg_s)
+
+    def test_standoff_correction_resumes_once_right_recedes(self):
+        """vx must no longer equal vy once reacquiring -- the standoff term
+        (driven by the substituted MAX_RANGE_M front) skews the command,
+        same as the original unconditional behavior.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        previous_right = 0.40
+        right = previous_right + cfg.right_increasing_hysteresis_m + 0.01
+
+        command = follower.compute_follow_command(
+            front=None, right=right, previous_right=previous_right
+        )
         unbraked_vx, unbraked_vy = _unbraked_vx_vy(cfg, MAX_RANGE_M, right)
         speed = math.hypot(unbraked_vx, unbraked_vy)
         if speed > cfg.max_velocity_m_s and speed > 0.0:
@@ -423,6 +534,107 @@ class TestFrontOutOfRangeRotatesBackToWall:
         assert command.vx == pytest.approx(unbraked_vx)
         assert command.vy == pytest.approx(unbraked_vy)
 
+    def test_just_above_hysteresis_boundary_counts_as_receding(self):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        previous_right = 0.40
+
+        command = follower.compute_follow_command(
+            front=None,
+            right=previous_right + cfg.right_increasing_hysteresis_m + 1e-6,
+            previous_right=previous_right,
+        )
+
+        assert command.yaw_rate_deg_s == pytest.approx(-cfg.max_yaw_rate_deg_s)
+
+    def test_result_reports_reacquiring_true_once_right_recedes(self):
+        """reacquiring must be exposed on the result so follow() can latch
+        it into previously_reacquiring for the next cycle -- see
+        TestReacquiringLatchesUntilFrontReturns.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        previous_right = 0.40
+
+        command = follower.compute_follow_command(
+            front=None,
+            right=previous_right + cfg.right_increasing_hysteresis_m + 0.01,
+            previous_right=previous_right,
+        )
+
+        assert command.reacquiring is True
+
+
+class TestReacquiringLatchesUntilFrontReturns:
+    """Regression for the code-review finding: right_receding must not be
+    recomputed from a single cycle's delta alone once reacquiring has
+    started, or a real-world gradual/noisy right increase (a per-cycle
+    delta that dips back under right_increasing_hysteresis_m even while the
+    wall is genuinely still receding overall) would chatter the loop
+    between holding straight and yawing hard, cycle to cycle. Once
+    previously_reacquiring is True, the loop stays in reacquire mode
+    regardless of the current cycle's delta, until front is no longer
+    missing (the wall face has actually been reacquired) or the wall is
+    lost entirely (right missing).
+    """
+
+    def test_stays_reacquiring_even_when_this_cycles_delta_is_small(self):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+
+        command = follower.compute_follow_command(
+            front=None,
+            right=0.41,  # +0.01 versus previous_right -- below the 0.05 hysteresis
+            previous_right=0.40,
+            previously_reacquiring=True,
+        )
+
+        assert command.yaw_rate_deg_s == pytest.approx(-cfg.max_yaw_rate_deg_s)
+        assert command.reacquiring is True
+
+    def test_stays_reacquiring_even_when_right_momentarily_decreases(self):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+
+        command = follower.compute_follow_command(
+            front=None,
+            right=0.35,  # decreased versus previous_right -- still latched
+            previous_right=0.40,
+            previously_reacquiring=True,
+        )
+
+        assert command.yaw_rate_deg_s == pytest.approx(-cfg.max_yaw_rate_deg_s)
+        assert command.reacquiring is True
+
+    def test_latch_resets_once_front_is_valid_again(self):
+        """Once front comes back into range (the new wall face is found),
+        reacquiring must clear -- the corner has genuinely been passed and
+        normal heading/standoff following resumes.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+
+        command = follower.compute_follow_command(
+            front=0.55, right=0.60, previously_reacquiring=True
+        )
+
+        assert command.reacquiring is False
+
+    def test_previously_reacquiring_false_does_not_latch_on_its_own(self):
+        """Sanity check: without previously_reacquiring=True, a small delta
+        must still hold straight -- the latch only kicks in once actually
+        set, not implicitly.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+
+        command = follower.compute_follow_command(front=None, right=0.41, previous_right=0.40)
+
+        assert command.yaw_rate_deg_s == pytest.approx(0.0)
+        assert command.reacquiring is False
+
+
+class TestRightMissingStillMeansWallLost:
     def test_right_missing_still_treated_as_wall_lost(self):
         """The one case that must NOT change: right missing means the
         followed wall is genuinely gone, regardless of front.
@@ -867,6 +1079,79 @@ class TestFollow:
         # the brake had snapped straight back to full speed on the single
         # "clear" poll, it would equal unbraked_vx instead.
         assert vx_values[2] < unbraked_vx
+
+    def test_front_missing_reacquires_once_right_recedes(self, mocker):
+        """follow()-level regression: previous_right must be tracked and
+        passed across iterations so the transition from straight-line hold
+        to reacquire actually happens during a real flight, not just in
+        isolated calls to compute_follow_command.
+        """
+        cfg = WallFollowConfig(follow_duration_s=100.0)
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        stable_right = 0.40
+        receding_right = stable_right + cfg.right_increasing_hysteresis_m + 0.01
+        readings_sequence = [
+            _readings(front=None, right=stable_right),
+            _readings(front=None, right=stable_right),
+            _readings(front=None, right=receding_right),
+        ]
+        mock_ranger.get_readings.side_effect = readings_sequence
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        call_count = {"n": 0}
+
+        def should_abort() -> bool:
+            call_count["n"] += 1
+            return call_count["n"] > len(readings_sequence) * 2
+
+        follower.follow(mock_mc, mock_ranger, should_abort=should_abort)
+
+        yaw_values = [
+            call.kwargs["rate_yaw"] for call in mock_mc.start_linear_motion.call_args_list
+        ]
+        assert len(yaw_values) == len(readings_sequence)
+        assert yaw_values[0] == pytest.approx(0.0)
+        assert yaw_values[1] == pytest.approx(0.0)
+        assert yaw_values[2] == pytest.approx(-cfg.max_yaw_rate_deg_s)
+
+    def test_reacquiring_latch_survives_a_small_delta_dip_across_cycles(self, mocker):
+        """follow()-level regression for the code-review finding: once a
+        cycle's delta crosses the hysteresis and reacquiring starts, a
+        later cycle whose per-tick delta dips back under
+        right_increasing_hysteresis_m (still front missing) must not flip
+        yaw back to 0.0 -- the latch, tracked and passed across follow()'s
+        loop the same way previous_v_follow and previous_right are, must
+        keep it in reacquire mode.
+        """
+        cfg = WallFollowConfig(follow_duration_s=100.0)
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        readings_sequence = [
+            _readings(front=None, right=0.40),  # stable -> hold
+            _readings(front=None, right=0.46),  # +0.06 -> crosses hysteresis, reacquiring
+            _readings(front=None, right=0.47),  # +0.01 -> would hold on its own; latched
+        ]
+        mock_ranger.get_readings.side_effect = readings_sequence
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        call_count = {"n": 0}
+
+        def should_abort() -> bool:
+            call_count["n"] += 1
+            return call_count["n"] > len(readings_sequence) * 2
+
+        follower.follow(mock_mc, mock_ranger, should_abort=should_abort)
+
+        yaw_values = [
+            call.kwargs["rate_yaw"] for call in mock_mc.start_linear_motion.call_args_list
+        ]
+        assert len(yaw_values) == len(readings_sequence)
+        assert yaw_values[0] == pytest.approx(0.0)
+        assert yaw_values[1] == pytest.approx(-cfg.max_yaw_rate_deg_s)
+        assert yaw_values[2] == pytest.approx(-cfg.max_yaw_rate_deg_s)
 
     def test_stop_called_exactly_once_on_normal_abort(self, mocker):
         follower = WallFollower(WallFollowConfig())

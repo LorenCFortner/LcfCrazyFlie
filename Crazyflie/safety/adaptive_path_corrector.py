@@ -3,7 +3,18 @@
 Monitors side sensors in a background thread and sets a correction flag
 when an obstacle enters the adaptive zone:
 
-    (_SIDE_CLEARANCE_M, ADAPTIVE_SIDE_THRESHOLD_M)
+    (side_threshold(v), side_threshold(v) + ADAPTIVE_BAND_WIDTH_M)
+
+where side_threshold(v) is CollisionMonitor's own velocity-scaled side
+threshold (_SIDE_CLEARANCE_M + v * _REACTION_S — see collision_monitor.py).
+The zone therefore sits just outside (farther than) whatever distance
+CollisionMonitor would itself trigger a COLLISION at, at the drone's current
+velocity: as an obstacle closes in, the adaptive zone is always reached
+first, giving the correction a chance to act before CollisionMonitor's own
+threshold is reached. A flat zone that didn't scale with velocity would be
+overtaken by CollisionMonitor's threshold at realistic flight speeds — at
+v=0 the two formulas coincide (side_threshold(0) == _SIDE_CLEARANCE_M), so
+this reduces to the original fixed (0.10, 0.15) m zone at rest.
 
 The correction is a small yaw turn to angle the drone parallel to the wall,
 or a brief downward nudge for a low ceiling.  The actual MotionCommander call
@@ -28,12 +39,22 @@ import time
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
-from Crazyflie.safety.collision_monitor import _FLIGHT_DIR_TO_SENSORS, _SIDE_CLEARANCE_M
+from Crazyflie.safety.collision_monitor import (
+    _FLIGHT_DIR_TO_SENSORS,
+    _REACTION_S,
+    _SIDE_CLEARANCE_M,
+)
 from Crazyflie.state.flight_state import FlightState
 
 logger = logging.getLogger(__name__)
 
-ADAPTIVE_SIDE_THRESHOLD_M: float = 0.15  # side-sensor adaptive zone upper bound
+# Width of the adaptive correction zone, measured above (farther than)
+# CollisionMonitor's own velocity-scaled side threshold — see module
+# docstring. Kept equal to the original fixed zone's width (0.15 - 0.10)
+# so the zone's size at any given velocity is unchanged from the original
+# design; only where it sits (relative to the now velocity-scaled collision
+# threshold) has changed.
+ADAPTIVE_BAND_WIDTH_M: float = 0.05
 ADAPTIVE_TURN_DEG: float = 15.0  # yaw correction magnitude (degrees)
 ADAPTIVE_TURN_RATE_DEG_S: float = 90.0  # yaw correction speed (deg/s)
 ADAPTIVE_VERT_NUDGE_M: float = 0.08  # vertical correction for up-sensor (metres)
@@ -201,6 +222,14 @@ class AdaptivePathCorrector:
 
         leading_sensors = _FLIGHT_DIR_TO_SENSORS.get(direction, ())
 
+        # Mirrors CollisionMonitor's own velocity-scaled side threshold (see
+        # module docstring) so the adaptive zone always sits just outside it,
+        # rather than a fixed zone that a fast enough collision threshold
+        # could grow past.
+        velocity = self._flight_state.get_velocity()
+        zone_lower = _SIDE_CLEARANCE_M + velocity * _REACTION_S
+        zone_upper = zone_lower + ADAPTIVE_BAND_WIDTH_M
+
         sensor_values: dict[str, float | None] = {
             "front": readings.front,
             "back": readings.back,
@@ -214,7 +243,7 @@ class AdaptivePathCorrector:
                 continue
             if value is None or value <= 0.0:
                 continue
-            if not (_SIDE_CLEARANCE_M < value < ADAPTIVE_SIDE_THRESHOLD_M):
+            if not (zone_lower < value < zone_upper):
                 continue
 
             if sensor_name == "up":

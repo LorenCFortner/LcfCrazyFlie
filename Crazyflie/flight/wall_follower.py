@@ -144,7 +144,7 @@ class WallFollowConfig:
     align_tolerance_m: float = 0.05
     align_step_deg: float = 5.0
     max_align_deg: float = 120.0
-    approach_velocity_m_s: float = 0.15
+    approach_velocity_m_s: float = 0.30
     max_search_distance_m: float = 4.0
     follow_duration_s: float = 45.0
     wall_lost_timeout_s: float = 1.5

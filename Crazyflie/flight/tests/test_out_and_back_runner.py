@@ -1,606 +1,186 @@
-"""Tests for out_and_back_runner._handle_safety_events.
+"""Tests for out_and_back_runner.run_out_and_back_flight.
 
-Written test-first (TDD). Tests cover the event-routing logic without
-requiring a real drone connection.
+Written test-first (TDD). run_out_and_back_flight() delegates the shared
+connect/clearance/monitor/teardown lifecycle to
+Crazyflie.flight.flight_lifecycle.run_flight_lifecycle() — that machinery is
+covered by test_flight_lifecycle.py. These tests mock run_flight_lifecycle
+itself and inspect/invoke the flight_body_fn and FlightLifecycleHooks that
+run_out_and_back_flight() builds, so they exercise only this runner's own
+logic: constructing SafeFlightController and AdaptivePathCorrector, running
+the path, and reacting to a COLLISION via the optional on_collision_fn hook.
 """
 
 import queue
-import threading
-import time
-from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
-import pytest
-
-from Crazyflie.flight.collision_return import CollisionContext
-from Crazyflie.flight.out_and_back_runner import (
-    _EVENT_WAIT_TIMEOUT_S,
-    _handle_safety_events,
-    run_out_and_back_flight,
-)
+from Crazyflie.flight.flight_lifecycle import EVENT_WAIT_TIMEOUT_S, FlightContext
+from Crazyflie.flight.out_and_back_runner import run_out_and_back_flight
 from Crazyflie.flight.path_runner import FlightStep
+from Crazyflie.flight.tests.conftest import capture_lifecycle_call
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def mc(mocker):
-    return mocker.MagicMock()
+_PATH = [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)]
 
 
-@pytest.fixture
-def scf(mocker):
-    return mocker.MagicMock()
+def _capture_lifecycle_call(mocker) -> Any:
+    """Patch run_flight_lifecycle so run_out_and_back_flight() never touches hardware."""
+    return capture_lifecycle_call(mocker, "Crazyflie.flight.out_and_back_runner")
 
 
-@pytest.fixture
-def stabilizer_monitor(mocker):
-    return mocker.MagicMock()
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-def test_handle_safety_events_returns_false_when_queue_empty(mc, scf, stabilizer_monitor):
-    eq: queue.Queue[str] = queue.Queue()
-
-    result = _handle_safety_events(eq, mc, scf, stabilizer_monitor)
-
-    assert result is False
-
-
-def test_handle_safety_events_calls_land_immediately_on_crash(mocker, mc, scf, stabilizer_monitor):
-    mock_land = mocker.patch("Crazyflie.flight.out_and_back_runner.land_immediately")
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("CRASH")
-
-    result = _handle_safety_events(eq, mc, scf, stabilizer_monitor)
-
-    assert result is True
-    mock_land.assert_called_once_with(mc)
-
-
-def test_handle_safety_events_calls_land_on_low_battery_on_batlow(
-    mocker, mc, scf, stabilizer_monitor
-):
-    mock_land = mocker.patch("Crazyflie.flight.out_and_back_runner.land_on_low_battery")
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("BATLOW")
-
-    result = _handle_safety_events(eq, mc, scf, stabilizer_monitor)
-
-    assert result is True
-    mock_land.assert_called_once_with(mc)
-
-
-def test_handle_safety_events_calls_mc_land_on_collision_when_no_collision_fn(
-    mc, scf, stabilizer_monitor
-):
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("COLLISION")
-
-    result = _handle_safety_events(eq, mc, scf, stabilizer_monitor)
-
-    assert result is True
-    mc.land.assert_called_once()
-
-
-def test_handle_safety_events_calls_custom_collision_fn_with_context_on_collision(
-    mocker, mc, scf, stabilizer_monitor
-):
-    custom_fn = mocker.MagicMock()
-    controller = mocker.MagicMock()
-    controller.flight_log = [mocker.MagicMock()]
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("COLLISION")
-
-    result = _handle_safety_events(
-        eq, mc, scf, stabilizer_monitor, controller=controller, on_collision_fn=custom_fn
+def _make_context(mocker, *, should_abort_value: bool = False) -> FlightContext:
+    return FlightContext(
+        mc=mocker.MagicMock(),
+        flight_state=mocker.MagicMock(),
+        event_queue=queue.Queue(),
+        stabilizer_monitor=mocker.MagicMock(),
+        collision_monitor=mocker.MagicMock(),
+        adaptive_corrector=mocker.MagicMock(),
+        should_abort=lambda: should_abort_value,
     )
 
-    assert result is True
-    custom_fn.assert_called_once()
-    mc.land.assert_not_called()
 
-
-def test_handle_safety_events_custom_collision_fn_receives_flight_log_in_context(
-    mocker, mc, scf, stabilizer_monitor
-):
-    received: list[CollisionContext] = []
-
-    def capture_fn(mc_arg, context, should_abort, flight_state, adaptive_corrector) -> None:
-        received.append(context)
-
-    controller = mocker.MagicMock()
-    fake_log = [mocker.MagicMock(), mocker.MagicMock()]
-    controller.flight_log = fake_log
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("COLLISION")
-
-    _handle_safety_events(
-        eq, mc, scf, stabilizer_monitor, controller=controller, on_collision_fn=capture_fn
-    )
-
-    assert len(received) == 1
-    assert received[0].flight_log == fake_log
-
-
-def test_handle_safety_events_collision_fn_receives_empty_log_without_controller(
-    mocker, mc, scf, stabilizer_monitor
-):
-    received: list[CollisionContext] = []
-
-    def capture_fn(mc_arg, context, should_abort, flight_state, adaptive_corrector) -> None:
-        received.append(context)
-
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("COLLISION")
-
-    _handle_safety_events(eq, mc, scf, stabilizer_monitor, on_collision_fn=capture_fn)
-
-    assert received[0].flight_log == []
-
-
-def test_handle_safety_events_resets_collision_monitor_before_calling_collision_fn(
-    mocker, mc, scf, stabilizer_monitor
-):
-    collision_monitor = mocker.MagicMock()
-    controller = mocker.MagicMock()
-    controller.flight_log = []
-    custom_fn = mocker.MagicMock()
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("COLLISION")
-
-    _handle_safety_events(
-        eq,
-        mc,
-        scf,
-        stabilizer_monitor,
-        controller=controller,
-        collision_monitor=collision_monitor,
-        on_collision_fn=custom_fn,
-    )
-
-    collision_monitor.reset.assert_called_once()
-
-
-def test_handle_safety_events_passes_collision_monitor_is_triggered_as_should_abort(
-    mocker, mc, scf, stabilizer_monitor
-):
-    collision_monitor = mocker.MagicMock()
-    controller = mocker.MagicMock()
-    controller.flight_log = []
-    custom_fn = mocker.MagicMock()
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("COLLISION")
-
-    _handle_safety_events(
-        eq,
-        mc,
-        scf,
-        stabilizer_monitor,
-        controller=controller,
-        collision_monitor=collision_monitor,
-        on_collision_fn=custom_fn,
-    )
-
-    _, args, _ = custom_fn.mock_calls[0]
-    should_abort_arg = args[2]
-    assert should_abort_arg is collision_monitor.is_triggered
-
-
-def test_handle_safety_events_should_abort_is_false_without_collision_monitor(
-    mocker, mc, scf, stabilizer_monitor
-):
-    controller = mocker.MagicMock()
-    controller.flight_log = []
-    custom_fn = mocker.MagicMock()
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("COLLISION")
-
-    _handle_safety_events(
-        eq, mc, scf, stabilizer_monitor, controller=controller, on_collision_fn=custom_fn
-    )
-
-    _, args, _ = custom_fn.mock_calls[0]
-    should_abort_arg = args[2]
-    assert should_abort_arg() is False
-
-
-def test_handle_safety_events_passes_flight_state_to_collision_fn(
-    mocker, mc, scf, stabilizer_monitor
-):
-    flight_state = mocker.MagicMock()
-    controller = mocker.MagicMock()
-    controller.flight_log = []
-    custom_fn = mocker.MagicMock()
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("COLLISION")
-
-    _handle_safety_events(
-        eq,
-        mc,
-        scf,
-        stabilizer_monitor,
-        controller=controller,
-        on_collision_fn=custom_fn,
-        flight_state=flight_state,
-    )
-
-    _, args, _ = custom_fn.mock_calls[0]
-    assert args[3] is flight_state
-
-
-def test_handle_safety_events_passes_adaptive_corrector_to_collision_fn(
-    mocker, mc, scf, stabilizer_monitor
-):
-    adaptive_corrector = mocker.MagicMock()
-    controller = mocker.MagicMock()
-    controller.flight_log = []
-    custom_fn = mocker.MagicMock()
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("COLLISION")
-
-    _handle_safety_events(
-        eq,
-        mc,
-        scf,
-        stabilizer_monitor,
-        controller=controller,
-        on_collision_fn=custom_fn,
-        adaptive_corrector=adaptive_corrector,
-    )
-
-    _, args, _ = custom_fn.mock_calls[0]
-    assert args[4] is adaptive_corrector
-
-
-def test_handle_safety_events_calls_land_immediately_on_unknown_event(
-    mocker, mc, scf, stabilizer_monitor
-):
-    mock_land = mocker.patch("Crazyflie.flight.out_and_back_runner.land_immediately")
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("UNKNOWN_EVENT")
-
-    result = _handle_safety_events(eq, mc, scf, stabilizer_monitor)
-
-    assert result is True
-    mock_land.assert_called_once_with(mc)
-
-
-def test_handle_safety_events_stops_stabilizer_monitor_on_event(mc, scf, stabilizer_monitor):
-    eq: queue.Queue[str] = queue.Queue()
-    eq.put("CRASH")
-
-    _handle_safety_events(eq, mc, scf, stabilizer_monitor)
-
-    stabilizer_monitor.stop.assert_called_once()
-
-
-def test_handle_safety_events_does_not_stop_monitor_when_queue_empty(mc, scf, stabilizer_monitor):
-    eq: queue.Queue[str] = queue.Queue()
-
-    _handle_safety_events(eq, mc, scf, stabilizer_monitor)
-
-    stabilizer_monitor.stop.assert_not_called()
+def _run_and_get_body_and_hooks(mocker, **kwargs: Any) -> tuple[Any, Any]:
+    """Call run_out_and_back_flight() and return (flight_body_fn, hooks)."""
+    mock_run = _capture_lifecycle_call(mocker)
+    run_out_and_back_flight(_PATH, uri="radio://0/80/2M", description="test", **kwargs)
+    args, call_kwargs = mock_run.call_args
+    _uri, body_fn = args
+    return body_fn, call_kwargs["hooks"]
 
 
 # ---------------------------------------------------------------------------
-# block_timeout_s — waits for an event instead of checking once.
-#
-# Regression coverage for the race: CollisionMonitor._trigger() sets
-# is_triggered()=True before its blocking avoidance move finishes and
-# queues "COLLISION", so a single get_nowait() check can miss an event
-# that's about to arrive. block_timeout_s makes the wait tolerant of that.
+# run_flight_lifecycle wiring — uri, telemetry_file passed through unchanged.
 # ---------------------------------------------------------------------------
 
 
-def test_handle_safety_events_block_timeout_returns_false_when_nothing_arrives(
-    mc, scf, stabilizer_monitor
-):
-    eq: queue.Queue[str] = queue.Queue()
+class TestLifecycleWiring:
+    def test_passes_uri_through(self, mocker):
+        mock_run = _capture_lifecycle_call(mocker)
 
-    result = _handle_safety_events(eq, mc, scf, stabilizer_monitor, block_timeout_s=0.05)
+        run_out_and_back_flight(_PATH, uri="radio://0/1/250K", description="test")
 
-    assert result is False
+        args, _ = mock_run.call_args
+        assert args[0] == "radio://0/1/250K"
 
-
-def test_handle_safety_events_block_timeout_picks_up_delayed_event(
-    mocker, mc, scf, stabilizer_monitor
-):
-    """An event that arrives shortly after the call started must still be
-    picked up — this is what a single get_nowait() check would miss.
-    """
-    eq: queue.Queue[str] = queue.Queue()
-    mock_land = mocker.patch("Crazyflie.flight.out_and_back_runner.land_immediately")
-
-    def delayed_put() -> None:
-        time.sleep(0.05)
-        eq.put("CRASH")
-
-    thread = threading.Thread(target=delayed_put)
-    thread.start()
-
-    result = _handle_safety_events(eq, mc, scf, stabilizer_monitor, block_timeout_s=0.5)
-    thread.join()
-
-    assert result is True
-    mock_land.assert_called_once_with(mc)
-
-
-def test_handle_safety_events_default_block_timeout_does_not_block(mc, scf, stabilizer_monitor):
-    """block_timeout_s defaults to 0.0 — an empty queue returns immediately,
-    matching the original get_nowait() behaviour. The bound here is
-    generous (well under any realistic blocking wait, e.g. this module's
-    own _EVENT_WAIT_TIMEOUT_S of 1.5s) purely to tolerate CI/scheduler
-    jitter — this test is not asserting a precise timing budget, only that
-    get_nowait()'s non-blocking path was actually taken.
-    """
-    eq: queue.Queue[str] = queue.Queue()
-
-    start = time.monotonic()
-    result = _handle_safety_events(eq, mc, scf, stabilizer_monitor)
-    elapsed = time.monotonic() - start
-
-    assert result is False
-    assert elapsed < 0.5
-
-
-# ---------------------------------------------------------------------------
-# Shared hardware-mocking helper for run_out_and_back_flight() tests below.
-# ---------------------------------------------------------------------------
-
-
-def _mock_flight_hardware(mocker: Any, *, collision_triggered: bool = False) -> dict[str, Any]:
-    """Mock every dependency run_out_and_back_flight() touches for hardware.
-
-    Args:
-        mocker: pytest-mock's mocker fixture.
-        collision_triggered: Value CollisionMonitor.is_triggered() returns.
-
-    Returns:
-        Dict of mocks/patches a caller may need to inspect afterward:
-        "collision_cls", "corrector_cls", "mock_corrector", "mock_collision",
-        "mock_stabilizer".
-    """
-    mock_scf_instance = mocker.MagicMock()
-    mock_scf_cm = mocker.MagicMock()
-    mock_scf_cm.__enter__ = mocker.MagicMock(return_value=mock_scf_instance)
-    mock_scf_cm.__exit__ = mocker.MagicMock(return_value=False)
-    mocker.patch("Crazyflie.flight.out_and_back_runner.SyncCrazyflie", return_value=mock_scf_cm)
-
-    mock_mc_instance = mocker.MagicMock()
-    mock_mc_cm = mocker.MagicMock()
-    mock_mc_cm.__enter__ = mocker.MagicMock(return_value=mock_mc_instance)
-    mock_mc_cm.__exit__ = mocker.MagicMock(return_value=False)
-    mocker.patch("Crazyflie.flight.out_and_back_runner.MotionCommander", return_value=mock_mc_cm)
-
-    mocker.patch("Crazyflie.flight.out_and_back_runner.cflib.crtp.init_drivers")
-    mocker.patch(
-        "Crazyflie.flight.out_and_back_runner.check_preflight_clearance", return_value=True
-    )
-
-    mock_stabilizer = mocker.MagicMock()
-    mock_stabilizer.state.battery_v = 4.0
-    mock_stabilizer.state.height_mm = 400
-    mock_stabilizer.is_triggered.return_value = False
-    stabilizer_cls = mocker.patch(
-        "Crazyflie.flight.out_and_back_runner.StabilizerMonitor", return_value=mock_stabilizer
-    )
-
-    mock_collision = mocker.MagicMock()
-    mock_collision.is_triggered.return_value = collision_triggered
-    collision_cls = mocker.patch(
-        "Crazyflie.flight.out_and_back_runner.CollisionMonitor", return_value=mock_collision
-    )
-
-    mock_corrector = mocker.MagicMock()
-    corrector_cls = mocker.patch(
-        "Crazyflie.flight.out_and_back_runner.AdaptivePathCorrector", return_value=mock_corrector
-    )
-
-    mocker.patch("Crazyflie.flight.out_and_back_runner.verify_takeoff", return_value=True)
-    mocker.patch("Crazyflie.flight.out_and_back_runner.time.sleep")
-
-    return {
-        "collision_cls": collision_cls,
-        "corrector_cls": corrector_cls,
-        "mock_corrector": mock_corrector,
-        "mock_collision": mock_collision,
-        "mock_stabilizer": mock_stabilizer,
-        "stabilizer_cls": stabilizer_cls,
-    }
-
-
-# ---------------------------------------------------------------------------
-# AdaptivePathCorrector wiring in run_out_and_back_flight()
-# ---------------------------------------------------------------------------
-
-
-class TestAdaptiveCorrectorWiring:
-    """run_out_and_back_flight() constructs and wires AdaptivePathCorrector."""
-
-    def _run_flight(self, mocker: Any) -> dict[str, Any]:
-        """Run run_out_and_back_flight() with all hardware mocked."""
-        path = [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)]
-        mocks = _mock_flight_hardware(mocker)
-
-        run_out_and_back_flight(path, uri="radio://0/80/2M", description="test")
-
-        return mocks
-
-    def test_creates_adaptive_corrector(self, mocker):
-        """AdaptivePathCorrector is constructed during the flight."""
-        mocks = self._run_flight(mocker)
-        mocks["corrector_cls"].assert_called_once()
-
-    def test_starts_and_stops_adaptive_corrector(self, mocker):
-        """AdaptivePathCorrector.start() and stop() are called around flight."""
-        mocks = self._run_flight(mocker)
-        mocks["mock_corrector"].start.assert_called_once()
-        mocks["mock_corrector"].stop.assert_called_once()
-
-    def test_passes_adaptive_corrector_to_collision_monitor(self, mocker):
-        """CollisionMonitor receives the corrector at construction."""
-        mocks = self._run_flight(mocker)
-        _, kwargs = mocks["collision_cls"].call_args
-        assert kwargs.get("adaptive_corrector") is mocks["mock_corrector"]
-
-
-# ---------------------------------------------------------------------------
-# Post-flight should_abort() -> event-wait handoff in run_out_and_back_flight()
-# ---------------------------------------------------------------------------
-
-
-class TestPostFlightEventWait:
-    """Whether _handle_safety_events is given block_timeout_s depends on
-    should_abort() after the flight call — only wait when a monitor
-    actually triggered, never on the normal-completion happy path.
-    """
-
-    def _run_flight(self, mocker: Any, *, collision_triggered: bool) -> MagicMock:
-        """Run run_out_and_back_flight() with all hardware mocked and
-        _handle_safety_events itself replaced with a spy.
-        """
-        path = [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)]
-        _mock_flight_hardware(mocker, collision_triggered=collision_triggered)
-
-        mock_handle_events = mocker.patch(
-            "Crazyflie.flight.out_and_back_runner._handle_safety_events", return_value=True
-        )
-
-        run_out_and_back_flight(path, uri="radio://0/80/2M", description="test")
-
-        return mock_handle_events
-
-    def test_waits_with_timeout_when_a_monitor_triggered(self, mocker):
-        mock_handle_events = self._run_flight(mocker, collision_triggered=True)
-
-        mock_handle_events.assert_called_once()
-        _, kwargs = mock_handle_events.call_args
-        assert kwargs.get("block_timeout_s") == _EVENT_WAIT_TIMEOUT_S
-
-    def test_not_called_on_normal_completion(self, mocker):
-        mock_handle_events = self._run_flight(mocker, collision_triggered=False)
-
-        mock_handle_events.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# FlightRecorder wiring — telemetry_file param in run_out_and_back_flight()
-# ---------------------------------------------------------------------------
-
-
-class TestTelemetryWiring:
-    """run_out_and_back_flight() creates/starts/stops a FlightRecorder when
-    telemetry_file is provided, and passes it to both monitors.
-    """
-
-    def _run_flight(
-        self,
-        mocker: Any,
-        *,
-        telemetry_file: Path | None,
-        raise_in_flight: bool = False,
-        recorder_start_raises: bool = False,
-    ) -> dict[str, Any]:
-        path = [FlightStep("forward", 1.0, velocity=0.3, settle_s=0.0)]
-        mocks = _mock_flight_hardware(mocker)
-
-        mock_recorder = mocker.MagicMock()
-        if recorder_start_raises:
-            mock_recorder.start.side_effect = OSError("disk full")
-        recorder_cls = mocker.patch(
-            "Crazyflie.flight.out_and_back_runner.FlightRecorder", return_value=mock_recorder
-        )
-
-        if raise_in_flight:
-            mocks["mock_corrector"].start.side_effect = RuntimeError("boom")
+    def test_passes_telemetry_file_through(self, mocker, tmp_path):
+        mock_run = _capture_lifecycle_call(mocker)
+        telemetry_file = tmp_path / "telemetry.csv"
 
         run_out_and_back_flight(
-            path, uri="radio://0/80/2M", description="test", telemetry_file=telemetry_file
+            _PATH, uri="radio://0/80/2M", description="test", telemetry_file=telemetry_file
         )
 
-        return {"recorder_cls": recorder_cls, "mock_recorder": mock_recorder, **mocks}
+        _, kwargs = mock_run.call_args
+        assert kwargs["telemetry_file"] is telemetry_file
 
-    def test_creates_and_starts_recorder_when_telemetry_file_given(self, mocker, tmp_path):
-        telemetry_file = tmp_path / "telemetry.csv"
+    def test_pre_and_post_flight_fns_passed_through_hooks(self, mocker):
+        pre_fn = mocker.MagicMock()
+        post_fn = mocker.MagicMock()
 
-        result = self._run_flight(mocker, telemetry_file=telemetry_file)
-
-        result["recorder_cls"].assert_called_once()
-        result["mock_recorder"].start.assert_called_once_with(telemetry_file)
-
-    def test_passes_recorder_to_stabilizer_monitor(self, mocker, tmp_path):
-        telemetry_file = tmp_path / "telemetry.csv"
-
-        result = self._run_flight(mocker, telemetry_file=telemetry_file)
-
-        _, kwargs = result["stabilizer_cls"].call_args
-        assert kwargs.get("recorder") is result["mock_recorder"]
-
-    def test_passes_recorder_to_collision_monitor(self, mocker, tmp_path):
-        telemetry_file = tmp_path / "telemetry.csv"
-
-        result = self._run_flight(mocker, telemetry_file=telemetry_file)
-
-        _, kwargs = result["collision_cls"].call_args
-        assert kwargs.get("recorder") is result["mock_recorder"]
-
-    def test_stops_recorder_after_normal_completion(self, mocker, tmp_path):
-        telemetry_file = tmp_path / "telemetry.csv"
-
-        result = self._run_flight(mocker, telemetry_file=telemetry_file)
-
-        result["mock_recorder"].stop.assert_called_once()
-
-    def test_stops_recorder_even_when_flight_raises(self, mocker, tmp_path):
-        telemetry_file = tmp_path / "telemetry.csv"
-
-        result = self._run_flight(mocker, telemetry_file=telemetry_file, raise_in_flight=True)
-
-        result["mock_recorder"].stop.assert_called_once()
-
-    def test_no_recorder_created_when_telemetry_file_omitted(self, mocker):
-        result = self._run_flight(mocker, telemetry_file=None)
-
-        result["recorder_cls"].assert_not_called()
-
-    def test_monitors_receive_none_recorder_when_telemetry_file_omitted(self, mocker):
-        result = self._run_flight(mocker, telemetry_file=None)
-
-        _, stabilizer_kwargs = result["stabilizer_cls"].call_args
-        _, collision_kwargs = result["collision_cls"].call_args
-        assert stabilizer_kwargs.get("recorder") is None
-        assert collision_kwargs.get("recorder") is None
-
-    def test_recorder_start_failure_does_not_abort_the_flight(self, mocker, tmp_path):
-        """Telemetry is a diagnostic nice-to-have, not a safety feature — a
-        recorder.start() failure (unwritable logs dir, full disk) must not
-        propagate and skip the flight's own try/finally cleanup.
-        """
-        telemetry_file = tmp_path / "telemetry.csv"
-
-        result = self._run_flight(
-            mocker, telemetry_file=telemetry_file, recorder_start_raises=True
-        )  # should not raise
-
-        result["mock_collision"].stop.assert_called_once()
-        result["mock_collision"].join.assert_called_once()
-
-    def test_monitors_receive_none_recorder_when_start_fails(self, mocker, tmp_path):
-        telemetry_file = tmp_path / "telemetry.csv"
-
-        result = self._run_flight(
-            mocker, telemetry_file=telemetry_file, recorder_start_raises=True
+        _, hooks = _run_and_get_body_and_hooks(
+            mocker, pre_flight_fn=pre_fn, post_flight_fn=post_fn
         )
 
-        _, stabilizer_kwargs = result["stabilizer_cls"].call_args
-        _, collision_kwargs = result["collision_cls"].call_args
-        assert stabilizer_kwargs.get("recorder") is None
-        assert collision_kwargs.get("recorder") is None
+        assert hooks.pre_flight_fn is pre_fn
+        assert hooks.post_flight_fn is post_fn
+
+
+# ---------------------------------------------------------------------------
+# AdaptivePathCorrector hook
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveCorrectorHook:
+    def test_hook_constructs_adaptive_path_corrector(self, mocker):
+        mock_corrector_cls = mocker.patch(
+            "Crazyflie.flight.out_and_back_runner.AdaptivePathCorrector"
+        )
+        _, hooks = _run_and_get_body_and_hooks(mocker)
+        fake_scf = mocker.MagicMock()
+        fake_flight_state = mocker.MagicMock()
+
+        result = hooks.make_adaptive_corrector(fake_scf, fake_flight_state)
+
+        mock_corrector_cls.assert_called_once_with(fake_scf, fake_flight_state)
+        assert result is mock_corrector_cls.return_value
+
+
+# ---------------------------------------------------------------------------
+# flight_body_fn — SafeFlightController construction and run_out_and_back call
+# ---------------------------------------------------------------------------
+
+
+class TestFlightBody:
+    def test_constructs_controller_with_path_and_context(self, mocker):
+        mock_sfc_cls = mocker.patch("Crazyflie.flight.out_and_back_runner.SafeFlightController")
+        body_fn, _ = _run_and_get_body_and_hooks(mocker)
+        ctx = _make_context(mocker)
+
+        body_fn(ctx)
+
+        mock_sfc_cls.assert_called_once_with(
+            _PATH, flight_state=ctx.flight_state, adaptive_corrector=ctx.adaptive_corrector
+        )
+
+    def test_calls_run_out_and_back_with_mc_and_should_abort(self, mocker):
+        mock_controller = mocker.MagicMock()
+        mocker.patch(
+            "Crazyflie.flight.out_and_back_runner.SafeFlightController",
+            return_value=mock_controller,
+        )
+        body_fn, _ = _run_and_get_body_and_hooks(mocker)
+        ctx = _make_context(mocker)
+
+        body_fn(ctx)
+
+        mock_controller.run_out_and_back.assert_called_once_with(
+            ctx.mc, should_abort=ctx.should_abort
+        )
+
+
+# ---------------------------------------------------------------------------
+# Post-run should_abort() -> handle_safety_events handoff
+# ---------------------------------------------------------------------------
+
+
+class TestPostFlightEventHandling:
+    def test_handle_safety_events_called_when_should_abort_true(self, mocker):
+        mocker.patch("Crazyflie.flight.out_and_back_runner.SafeFlightController")
+        mock_handle = mocker.patch("Crazyflie.flight.out_and_back_runner.handle_safety_events")
+        on_collision_fn = mocker.MagicMock()
+        body_fn, _ = _run_and_get_body_and_hooks(mocker, on_collision_fn=on_collision_fn)
+        ctx = _make_context(mocker, should_abort_value=True)
+
+        body_fn(ctx)
+
+        mock_handle.assert_called_once_with(
+            ctx.event_queue,
+            ctx.mc,
+            ctx.stabilizer_monitor,
+            controller=mocker.ANY,
+            collision_monitor=ctx.collision_monitor,
+            on_collision_fn=on_collision_fn,
+            flight_state=ctx.flight_state,
+            adaptive_corrector=ctx.adaptive_corrector,
+            block_timeout_s=EVENT_WAIT_TIMEOUT_S,
+        )
+
+    def test_handle_safety_events_not_called_on_normal_completion(self, mocker):
+        mocker.patch("Crazyflie.flight.out_and_back_runner.SafeFlightController")
+        mock_handle = mocker.patch("Crazyflie.flight.out_and_back_runner.handle_safety_events")
+        body_fn, _ = _run_and_get_body_and_hooks(mocker)
+        ctx = _make_context(mocker, should_abort_value=False)
+
+        body_fn(ctx)
+
+        mock_handle.assert_not_called()
+
+    def test_leftover_events_drained_after_body_runs(self, mocker):
+        mocker.patch("Crazyflie.flight.out_and_back_runner.SafeFlightController")
+        mocker.patch("Crazyflie.flight.out_and_back_runner.handle_safety_events")
+        body_fn, _ = _run_and_get_body_and_hooks(mocker)
+        ctx = _make_context(mocker, should_abort_value=False)
+        ctx.event_queue.put("COLLISION")
+
+        body_fn(ctx)
+
+        assert ctx.event_queue.empty()

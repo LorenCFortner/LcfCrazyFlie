@@ -1,11 +1,14 @@
 """Right-wall-following flight runner for Crazyflie 2.0.
 
 Provides run_wall_follow_flight() — the full connection-to-landing lifecycle
-for scripts/right_wall_follow.py, mirroring
-Crazyflie.flight.out_and_back_runner.run_out_and_back_flight()'s lifecycle
-(connect, arm, clearance check, safety monitors, takeoff verification,
-teardown) but flying WallFollower's search/align/follow sequence instead of
-a pre-planned FlightStep path.
+for scripts/right_wall_follow.py, flying WallFollower's search/align/follow
+sequence instead of a pre-planned FlightStep path.
+
+The connect -> clearance -> monitors -> takeoff-verify -> teardown lifecycle
+itself lives in Crazyflie.flight.flight_lifecycle.run_flight_lifecycle(),
+shared with Crazyflie.flight.out_and_back_runner. This module supplies only
+the wall-follow-specific flight body: waiting for the first Multi-ranger
+reading, then running the search -> align -> follow sequence.
 
 CollisionMonitor is the sole owner of the Multi-ranger connection for the
 whole flight (see its get_latest_readings() docstring) — WallFollower reads
@@ -14,64 +17,29 @@ opening a second, unsafe connection of its own.
 """
 
 import logging
-import queue
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-import cflib.crtp
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-from cflib.positioning.motion_commander import MotionCommander
 
-from Crazyflie.decks.led_ring import LedRingDeck
 from Crazyflie.decks.multi_ranger import MultiRangerReadings
+from Crazyflie.flight.flight_lifecycle import (
+    EVENT_WAIT_TIMEOUT_S,
+    FlightContext,
+    FlightLifecycleHooks,
+    handle_safety_events,
+    run_flight_lifecycle,
+)
 from Crazyflie.flight.wall_follower import WallFollowConfig, WallFollower
-from Crazyflie.safety.clearance_check import check_preflight_clearance
 from Crazyflie.safety.collision_monitor import CollisionMonitor
-from Crazyflie.safety.emergency_land import land_immediately, land_on_low_battery
-from Crazyflie.safety.takeoff_verifier import verify_takeoff
-from Crazyflie.state.flight_state import FlightState
-from Crazyflie.telemetry.flight_recorder import FlightRecorder
-from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
 logger = logging.getLogger(__name__)
-
-_POST_DISCONNECT_SLEEP_S: float = 5.0  # Allow drone radio to reset before next run.
-_STABILIZE_STEPS: int = 3  # One-second hover/log steps before the search leg.
 
 # How long get_latest_readings() may return None (no poll completed yet)
 # before the search leg gives up waiting for CollisionMonitor's first
 # reading. Generous relative to the 10 Hz poll rate to absorb radio jitter.
 _FIRST_READING_TIMEOUT_S: float = 2.0
-
-# CollisionMonitor._trigger() sets is_triggered()=True before its blocking
-# avoidance move finishes and queues "COLLISION" — worst case ~0.3-0.7 s at
-# MAX_SAFE_VELOCITY_M_S. This is how long a post-phase event check blocks for
-# that event to actually arrive, so should_abort()==True is never followed by
-# a landing sequence that races the avoidance move still driving mc from
-# CollisionMonitor's own thread.
-_EVENT_WAIT_TIMEOUT_S: float = 1.5
-
-
-def _default_pre_flight(scf: SyncCrazyflie) -> None:
-    """Arm the LED ring before takeoff.
-
-    Args:
-        scf: Connected SyncCrazyflie instance.
-    """
-    LedRingDeck.headlights_on(scf)
-    LedRingDeck.set_effect(scf, 7)
-    LedRingDeck.set_brightness(scf, 31)
-
-
-def _default_post_flight(scf: SyncCrazyflie) -> None:
-    """Turn off LEDs after landing.
-
-    Args:
-        scf: Connected SyncCrazyflie instance.
-    """
-    LedRingDeck.turn_off(scf)
-
 
 # How stale a reading from CollisionMonitor's poll thread may be before this
 # adapter treats it as unreadable rather than steering from it. WallFollower
@@ -144,60 +112,6 @@ def _wait_for_first_ranger_reading(
     return False
 
 
-def _handle_safety_events(
-    event_queue: queue.Queue[str],
-    mc: MotionCommander,
-    stabilizer_monitor: StabilizerMonitor,
-    block_timeout_s: float = 0.0,
-) -> bool:
-    """Drain the event queue and react to any CRASH/BATLOW/COLLISION event.
-
-    Unlike run_out_and_back_flight, a COLLISION here always lands in place:
-    a wall-follow flight has no recorded path to retrace, and a side
-    collision during following is a stop-and-land case, not a retrace-home
-    case.
-
-    Args:
-        event_queue: Queue receiving CRASH / BATLOW / COLLISION messages.
-        mc: Active MotionCommander instance.
-        stabilizer_monitor: Running StabilizerMonitor (stopped on event).
-        block_timeout_s: When > 0, wait up to this many seconds for an event
-            to appear instead of checking once. A caller that already knows
-            a monitor triggered (should_abort() is True) should block rather
-            than check once and miss it — CollisionMonitor sets
-            is_triggered() True before its blocking avoidance move finishes
-            and queues "COLLISION". Defaults to 0.0 (non-blocking).
-
-    Returns:
-        True if a safety event was handled, False if the queue was empty.
-    """
-    try:
-        if block_timeout_s > 0.0:
-            event = event_queue.get(timeout=block_timeout_s)
-        else:
-            event = event_queue.get_nowait()
-    except queue.Empty:
-        return False
-
-    logger.info(f"Safety event received: {event}")
-    stabilizer_monitor.stop()
-
-    if event == "CRASH":
-        logger.warning("CRASH detected — emergency landing.")
-        land_immediately(mc)
-    elif event == "BATLOW":
-        logger.warning("Low battery — landing now.")
-        land_on_low_battery(mc)
-    elif event == "COLLISION":
-        logger.warning("Obstacle detected — avoidance complete, landing now.")
-        mc.land()
-    else:
-        logger.warning(f"Unknown event '{event}' — landing immediately as precaution.")
-        land_immediately(mc)
-
-    return True
-
-
 def run_wall_follow_flight(
     uri: str,
     config: WallFollowConfig | None = None,
@@ -226,154 +140,58 @@ def run_wall_follow_flight(
             Defaults to turning off the LED ring when None.
     """
     cfg = config if config is not None else WallFollowConfig()
-    _pre = pre_flight_fn if pre_flight_fn is not None else _default_pre_flight
-    _post = post_flight_fn if post_flight_fn is not None else _default_post_flight
 
-    cflib.crtp.init_drivers(enable_debug_driver=False)
+    def _flight_body(ctx: FlightContext) -> None:
+        follower = WallFollower(cfg, flight_state=ctx.flight_state)
+        ranger_adapter = _CollisionMonitorRangerAdapter(ctx.collision_monitor)
 
-    event_queue: queue.Queue[str] = queue.Queue()
-    flight_state = FlightState()
+        def _handle_abort() -> None:
+            # should_abort() just became True — a monitor may have triggered
+            # mid-phase, but its event might not be queued yet (see
+            # handle_safety_events' block_timeout_s docstring). Wait rather
+            # than check once and miss it.
+            handle_safety_events(
+                ctx.event_queue,
+                ctx.mc,
+                ctx.stabilizer_monitor,
+                block_timeout_s=EVENT_WAIT_TIMEOUT_S,
+            )
 
-    logger.info(f"Connecting to {uri}...")
-
-    with SyncCrazyflie(uri) as scf:
-        logger.info("Connected.")
-        scf.cf.commander.send_stop_setpoint()
-        scf.cf.commander.send_notify_setpoint_stop()
-        scf.cf.platform.send_arming_request(True)
-        time.sleep(0.1)
-
-        logger.info("Checking pre-flight clearance...")
-        if not check_preflight_clearance(scf):
-            logger.error("Pre-flight clearance check FAILED — too close to an obstacle. Aborting.")
+        if not _wait_for_first_ranger_reading(ctx.collision_monitor):
+            logger.error("No Multi-ranger reading received — aborting.")
             return
-        logger.info("Clearance OK.")
 
-        _pre(scf)
-
-        recorder: FlightRecorder | None = None
-        if telemetry_file is not None:
-            recorder = FlightRecorder()
-            try:
-                recorder.start(telemetry_file)
-            except OSError as exc:
-                # Telemetry is a diagnostic nice-to-have, not a safety
-                # feature — a failure here must never abort a flight that's
-                # already armed, or skip the try/finally cleanup below by
-                # propagating out of this `with SyncCrazyflie` block.
-                logger.error(f"Failed to start telemetry recording to {telemetry_file}: {exc}")
-                recorder = None
-
-        stabilizer_monitor = StabilizerMonitor(scf, event_queue, recorder=recorder)
-        stabilizer_monitor.start()
-
-        collision_monitor = CollisionMonitor(
-            scf, event_queue, flight_state=flight_state, recorder=recorder
+        logger.info("Searching for the first obstacle...")
+        found = follower.fly_to_first_obstacle(
+            ctx.mc, ranger_adapter, should_abort=ctx.should_abort
         )
-        follower = WallFollower(cfg, flight_state=flight_state)
-        ranger_adapter = _CollisionMonitorRangerAdapter(collision_monitor)
+        if ctx.should_abort():
+            _handle_abort()
+            return
+        if not found:
+            logger.warning(
+                f"No obstacle found within {cfg.max_search_distance_m:.1f} m — landing."
+            )
+            return
 
-        stabilizer_monitor.wait_for_first_reading()
-        initial_battery_v = stabilizer_monitor.state.battery_v
-        initial_height_mm = stabilizer_monitor.state.height_mm
-        logger.info(f"Battery: {initial_battery_v:.2f} V")
+        logger.info("Aligning to the wall...")
+        aligned = follower.align_to_wall(ctx.mc, ranger_adapter)
+        if ctx.should_abort():
+            _handle_abort()
+            return
+        if not aligned:
+            logger.warning("Could not align to the wall — landing.")
+            return
 
-        flight_start = time.time()
+        logger.info("Following the wall...")
+        follower.follow(ctx.mc, ranger_adapter, should_abort=ctx.should_abort)
 
-        def should_abort() -> bool:
-            return collision_monitor.is_triggered() or stabilizer_monitor.is_triggered()
+        if ctx.should_abort():
+            _handle_abort()
+            return
 
-        try:
-            with MotionCommander(scf) as mc:
-                # Start collision monitoring only once airborne — clearance
-                # check already guards pre-takeoff proximity, and
-                # ground-level sensor readings fluctuate and can spuriously
-                # trigger a COLLISION event.
-                collision_monitor.start()
-                collision_monitor.attach_motion_commander(mc)
-                logger.info(f"Airborne — stabilizing for {_STABILIZE_STEPS} seconds...")
-                for i in range(_STABILIZE_STEPS):
-                    time.sleep(1.0)
-                    height_cm = stabilizer_monitor.state.height_mm / 10.0
-                    batt = stabilizer_monitor.state.battery_v
-                    logger.info(
-                        f"  Stabilizing: {i + 1}s | height: {height_cm:.1f} cm"
-                        f" | battery: {batt:.2f} V"
-                    )
+        logger.info("Wall follow complete — landing.")
 
-                if not verify_takeoff(
-                    height_mm=stabilizer_monitor.state.height_mm,
-                    battery_v=stabilizer_monitor.state.battery_v,
-                    initial_height_mm=initial_height_mm,
-                    initial_battery_v=initial_battery_v,
-                ):
-                    return
+    hooks = FlightLifecycleHooks(pre_flight_fn=pre_flight_fn, post_flight_fn=post_flight_fn)
 
-                if not _wait_for_first_ranger_reading(collision_monitor):
-                    logger.error("No Multi-ranger reading received — aborting.")
-                    return
-
-                logger.info("Searching for the first obstacle...")
-                found = follower.fly_to_first_obstacle(
-                    mc, ranger_adapter, should_abort=should_abort
-                )
-                if should_abort():
-                    # should_abort() just became True — a monitor may have
-                    # triggered mid-search, but its event might not be
-                    # queued yet (see _handle_safety_events' block_timeout_s
-                    # docstring). Wait rather than check once and miss it.
-                    _handle_safety_events(
-                        event_queue, mc, stabilizer_monitor, block_timeout_s=_EVENT_WAIT_TIMEOUT_S
-                    )
-                    return
-                if not found:
-                    logger.warning(
-                        f"No obstacle found within {cfg.max_search_distance_m:.1f} m — landing."
-                    )
-                    return
-
-                logger.info("Aligning to the wall...")
-                aligned = follower.align_to_wall(mc, ranger_adapter)
-                if should_abort():
-                    _handle_safety_events(
-                        event_queue, mc, stabilizer_monitor, block_timeout_s=_EVENT_WAIT_TIMEOUT_S
-                    )
-                    return
-                if not aligned:
-                    logger.warning("Could not align to the wall — landing.")
-                    return
-
-                logger.info("Following the wall...")
-                follower.follow(mc, ranger_adapter, should_abort=should_abort)
-
-                if should_abort():
-                    _handle_safety_events(
-                        event_queue, mc, stabilizer_monitor, block_timeout_s=_EVENT_WAIT_TIMEOUT_S
-                    )
-                    return
-
-                logger.info("Wall follow complete — landing.")
-
-        except Exception as exc:
-            logger.error(f"Flight error: {exc}")
-        finally:
-            collision_monitor.detach_motion_commander()
-            collision_monitor.stop()
-            collision_monitor.join()
-            flight_time = time.time() - flight_start
-            stabilizer_monitor.stop()
-            stabilizer_monitor.join()
-            if recorder is not None:
-                recorder.stop()
-            try:
-                _post(scf)
-            except Exception:
-                pass
-            try:
-                scf.cf.commander.send_stop_setpoint()
-                scf.cf.commander.send_notify_setpoint_stop()
-            except Exception:
-                pass
-            logger.info(f"Total flight time: {flight_time:.1f} s")
-
-    time.sleep(_POST_DISCONNECT_SLEEP_S)
+    run_flight_lifecycle(uri, _flight_body, hooks=hooks, telemetry_file=telemetry_file)

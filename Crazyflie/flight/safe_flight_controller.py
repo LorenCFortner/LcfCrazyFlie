@@ -10,8 +10,14 @@ call to return.
 
 When a FlightState is provided, the current velocity is written to it before
 each linear movement step so CollisionMonitor can compute a velocity-appropriate
-detection threshold. The FlightState is NOT updated during the 180° pivot in
-run_out_and_back because the pivot velocity is in deg/s, not m/s.
+detection threshold. On a turn (including the 180° pivot in run_out_and_back),
+direction is set to None and velocity is set to 0.0 — the pivot's own rate is
+in deg/s, not m/s, so it is never written as a linear velocity, but a
+stationary pivot also has no linear stopping distance to protect, so the
+FlightState must not keep carrying whatever the previous linear step's
+velocity was. See CollisionMonitor's velocity-scaled side threshold for why
+a stale nonzero velocity during a turn would be unsafe (a false COLLISION on
+any pivot flown close to a wall).
 
 A ValueError is raised if any linear step's velocity exceeds
 MAX_SAFE_VELOCITY_M_S (imported from collision_monitor). Turn commands are
@@ -376,6 +382,14 @@ class SafeFlightController:
         if self._state is not None:
             if is_turn:
                 self._state.set_direction(None)
+                # A pivot has no linear travel to stop, so there is no
+                # stopping-distance margin to reserve — velocity must read
+                # 0.0, not the previous linear step's value. Left non-zero,
+                # CollisionMonitor's velocity-scaled side threshold would
+                # treat a stationary rotation as if it were still
+                # translating, and any pivot flown close to a wall (e.g. the
+                # 180° turn-around leg) would false-trigger a COLLISION.
+                self._state.set_velocity(0.0)
             else:
                 self._state.set_velocity(velocity)
                 self._state.set_direction(command)

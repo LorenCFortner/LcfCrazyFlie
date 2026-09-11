@@ -7,6 +7,15 @@ A shared FlightState is passed to both SafeFlightController and
 CollisionMonitor so the detection threshold scales automatically with the
 velocity of each flight step.
 
+Forward-leg velocity is 0.25 m/s (reduced from 0.5 m/s — flies roughly twice
+as slowly as before). CollisionMonitor's side-sensor threshold is now
+additive with velocity (SIDE_CLEARANCE_M + velocity * REACTION_S — see
+Crazyflie.safety.collision_monitor), so at 0.5 m/s any doorway, corridor
+wall, or piece of furniture within ~0.43 m would trigger a COLLISION that
+this route previously flew past cleanly. 0.25 m/s keeps that threshold at a
+more forgiving ~0.26 m. Re-fly and observe this route before trusting it at
+the new speed.
+
 Route (outbound leg — run_out_and_back retraces in reverse to return home):
   forward 1.6 m → left 1.7 m → forward 6.0 m →
   left 0.3 m   → forward 0.3 m → left 0.3 m
@@ -45,17 +54,17 @@ _LOG_FILE: Path = Path(__file__).parent / "logs" / "safe_flight_around_house.log
 _TELEMETRY_FILE: Path = Path(__file__).parent / "logs" / "safe_flight_around_house_telemetry.csv"
 
 HOUSE_PATH = [
-    FlightStep("forward", 1.6, velocity=0.5),
+    FlightStep("forward", 1.6, velocity=0.25),
     FlightStep("turn_left", 90, velocity=90),
-    FlightStep("forward", 1.0, velocity=0.5),
+    FlightStep("forward", 1.0, velocity=0.25),
     FlightStep("turn_right", 95, velocity=95),
-    FlightStep("forward", 6.0, velocity=0.5),
+    FlightStep("forward", 6.0, velocity=0.25),
     FlightStep("turn_left", 90, velocity=90),
-    FlightStep("forward", 0.3, velocity=0.5),
+    FlightStep("forward", 0.3, velocity=0.25),
     FlightStep("turn_right", 90, velocity=90),
-    FlightStep("forward", 0.3, velocity=0.5),
+    FlightStep("forward", 0.3, velocity=0.25),
     FlightStep("turn_left", 90, velocity=90),
-    FlightStep("forward", 0.3, velocity=0.5),
+    FlightStep("forward", 0.3, velocity=0.25),
 ]
 
 

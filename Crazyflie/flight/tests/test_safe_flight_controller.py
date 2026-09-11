@@ -432,8 +432,12 @@ class TestFlightStateVelocityPropagation:
         assert spy.call_args_list[0].args[0] == pytest.approx(0.3)
         assert spy.call_args_list[1].args[0] == pytest.approx(0.5)
 
-    def test_flight_state_not_updated_during_pivot(self, mock_mc, mocker):
-        """Pivot uses deg/s — FlightState must not be updated during the turn."""
+    def test_flight_state_velocity_zeroed_during_pivot(self, mock_mc, mocker):
+        """The pivot writes velocity 0.0 — it has no linear travel to stop,
+        and a stale nonzero velocity would make CollisionMonitor's
+        velocity-scaled side threshold misjudge a stationary rotation as
+        still translating.
+        """
         state = FlightState()
         spy = mocker.spy(state, "set_velocity")
         controller = SafeFlightController(
@@ -444,10 +448,11 @@ class TestFlightStateVelocityPropagation:
         with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
             controller.run_out_and_back(mock_mc, should_abort=never_abort)
 
-        # 1 outbound step + 1 return step = 2 calls; pivot contributes none
-        assert spy.call_count == 2
-        for call in spy.call_args_list:
-            assert call.args[0] == pytest.approx(0.3)
+        # 1 outbound step + 1 pivot + 1 return step = 3 calls
+        assert spy.call_count == 3
+        assert spy.call_args_list[0].args[0] == pytest.approx(0.3)
+        assert spy.call_args_list[1].args[0] == pytest.approx(0.0)
+        assert spy.call_args_list[2].args[0] == pytest.approx(0.3)
 
     def test_no_flight_state_runs_normally(self, mock_mc):
         """Without FlightState the controller behaves identically to before."""
@@ -518,6 +523,27 @@ class TestFlightStateDirectionPropagation:
 
         spy.assert_called_once_with(None)
 
+    @pytest.mark.parametrize("command", ["turn_left", "turn_right"])
+    def test_turn_zeroes_velocity_on_flight_state(self, mock_mc, mocker, command):
+        """A standalone turn step (not just the run_out_and_back pivot) must
+        also zero velocity — the deg/s turn rate is never written as a
+        linear velocity, and the previous linear step's velocity must not
+        be left stale on FlightState.
+        """
+        state = FlightState()
+        state.set_velocity(0.5)  # simulate a preceding linear step
+        spy = mocker.spy(state, "set_velocity")
+        controller = SafeFlightController(
+            [FlightStep(command, 90.0, velocity=45.0, settle_s=0.0)],
+            flight_state=state,
+        )
+
+        with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
+            controller.run(mock_mc, should_abort=never_abort)
+
+        spy.assert_called_once_with(0.0)
+        assert state.get_velocity() == pytest.approx(0.0)
+
     def test_direction_written_for_each_step_in_order(self, mock_mc, mocker):
         state = FlightState()
         spy = mocker.spy(state, "set_direction")
@@ -563,8 +589,8 @@ class TestFlightStateDirectionPropagation:
         none_calls = [c for c in direction_spy.call_args_list if c.args[0] is None]
         assert len(none_calls) >= 1
 
-    def test_flight_state_not_updated_during_pivot_velocity(self, mock_mc, mocker):
-        """Pivot must not call set_velocity — confirmed from existing test; direction call is None."""
+    def test_pivot_zeroes_velocity_and_clears_direction(self, mock_mc, mocker):
+        """Pivot calls set_velocity(0.0) and set_direction(None) together."""
         state = FlightState()
         velocity_spy = mocker.spy(state, "set_velocity")
         direction_spy = mocker.spy(state, "set_direction")
@@ -576,8 +602,9 @@ class TestFlightStateDirectionPropagation:
         with patch("Crazyflie.flight.safe_flight_controller.time.sleep"):
             controller.run_out_and_back(mock_mc, should_abort=never_abort)
 
-        # 1 outbound + 1 return = 2 velocity calls; pivot contributes none
-        assert velocity_spy.call_count == 2
+        # 1 outbound + 1 pivot + 1 return = 3 velocity calls
+        assert velocity_spy.call_count == 3
+        assert velocity_spy.call_args_list[1].args[0] == pytest.approx(0.0)
         # Direction calls: forward, None (pivot), forward = 3 calls
         assert direction_spy.call_count == 3
         assert direction_spy.call_args_list[1].args[0] is None

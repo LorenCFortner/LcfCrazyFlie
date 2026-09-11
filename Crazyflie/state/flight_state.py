@@ -2,15 +2,29 @@
 
 Provides a single object that tracks live flight parameters across threads.
 SafeFlightController writes the current velocity and direction before each
-movement step; CollisionMonitor reads them to compute velocity-appropriate
-detection thresholds and apply directional sensor logic.
+movement step; WallFollower (Crazyflie.flight.wall_follower) does the same
+for its continuous 45°-diagonal wall-following loop. CollisionMonitor reads
+them to compute velocity-appropriate detection thresholds and apply
+directional sensor logic.
 
 Write access discipline:
-    current_velocity_m_s — SafeFlightController only.
-    current_direction     — SafeFlightController only.
+    current_velocity_m_s — SafeFlightController or WallFollower only.
+    current_direction     — SafeFlightController or WallFollower only.
     No other component should call set_velocity() or set_direction(). This
     ownership rule keeps the state consistent: only the component that knows
-    the ground truth may write it.
+    the ground truth may write it — and each flight mode has exactly one
+    such component active at a time.
+
+Direction values:
+    'forward', 'back', 'left', 'right', 'up' — a single-axis linear move.
+    'forward_left' — WallFollower's continuous 45° diagonal travel (forward
+        and left simultaneously). CollisionMonitor treats both 'front' and
+        'left' as leading sensors for this direction (see
+        _FLIGHT_DIR_TO_SENSORS in collision_monitor.py).
+    None — hovering, turning, or direction unknown. A turn always pairs
+        None with velocity 0.0 (SafeFlightController zeroes velocity when it
+        clears direction on a turn) since a stationary pivot has no linear
+        stopping distance to protect.
 
 Example:
     >>> state = FlightState()
@@ -30,12 +44,14 @@ class FlightState:
 
     Attributes:
         current_velocity_m_s: Linear velocity of the current flight step in
-            m/s. Updated by SafeFlightController before each movement step.
-            Reads return 0.0 until the first step begins.
+            m/s. Updated by SafeFlightController before each movement step,
+            or by WallFollower each control cycle. Reads return 0.0 until
+            the first step begins.
         current_direction: Command name of the current linear movement
-            ('forward', 'back', 'left', 'right', 'up'), or None when the
-            drone is hovering, turning, or direction is unknown. Updated by
-            SafeFlightController before each step.
+            ('forward', 'back', 'left', 'right', 'up', 'forward_left'), or
+            None when the drone is hovering, turning, or direction is
+            unknown. Updated by SafeFlightController before each step, or by
+            WallFollower each control cycle.
 
     Example:
         >>> state = FlightState()
@@ -60,7 +76,7 @@ class FlightState:
     def set_velocity(self, velocity: float) -> None:
         """Set the current flight velocity.
 
-        Only SafeFlightController should call this method.
+        Only SafeFlightController or WallFollower should call this method.
 
         Args:
             velocity: Linear velocity in m/s.
@@ -80,12 +96,12 @@ class FlightState:
     def set_direction(self, direction: str | None) -> None:
         """Set the current flight direction.
 
-        Only SafeFlightController should call this method.
+        Only SafeFlightController or WallFollower should call this method.
 
         Args:
             direction: Command name of the current linear movement
-                ('forward', 'back', 'left', 'right', 'up'), or None for
-                hovering, turning, or unknown direction.
+                ('forward', 'back', 'left', 'right', 'up', 'forward_left'),
+                or None for hovering, turning, or unknown direction.
         """
         with self._lock:
             self.current_direction = direction

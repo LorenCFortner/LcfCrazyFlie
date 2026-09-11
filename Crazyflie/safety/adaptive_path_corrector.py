@@ -28,7 +28,7 @@ import time
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
-from Crazyflie.safety.collision_monitor import _FLIGHT_DIR_TO_SENSOR, _SIDE_CLEARANCE_M
+from Crazyflie.safety.collision_monitor import _FLIGHT_DIR_TO_SENSORS, _SIDE_CLEARANCE_M
 from Crazyflie.state.flight_state import FlightState
 
 logger = logging.getLogger(__name__)
@@ -199,7 +199,7 @@ class AdaptivePathCorrector:
         if now - self._last_correction_time < ADAPTIVE_COOLDOWN_S:
             return
 
-        leading_sensor = _FLIGHT_DIR_TO_SENSOR.get(direction, "")
+        leading_sensors = _FLIGHT_DIR_TO_SENSORS.get(direction, ())
 
         sensor_values: dict[str, float | None] = {
             "front": readings.front,
@@ -210,7 +210,7 @@ class AdaptivePathCorrector:
         }
 
         for sensor_name, value in sensor_values.items():
-            if sensor_name == leading_sensor:
+            if sensor_name in leading_sensors:
                 continue
             if value is None or value <= 0.0:
                 continue

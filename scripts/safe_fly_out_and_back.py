@@ -7,6 +7,15 @@ A shared FlightState is passed to both SafeFlightController and
 CollisionMonitor so the detection threshold scales automatically with the
 velocity of each flight step.
 
+Outbound velocity is 0.25 m/s (reduced from 0.3 m/s). CollisionMonitor's
+side-sensor threshold is now additive with velocity (SIDE_CLEARANCE_M +
+velocity * REACTION_S — see Crazyflie.safety.collision_monitor), so this
+keeps the lateral threshold at a forgiving ~0.26 m rather than the ~0.30 m
+0.3 m/s would give. Re-fly and observe this route before trusting it at the
+new speed. Note the collision-response leg (_COLLISION_RETURN_VELOCITY) is
+a direct mc.back()/mc.forward() call outside SafeFlightController, not a
+FlightStep, and was left at 0.5 m/s — out of scope for this change.
+
 Pre-flight:
   1. Clearance check — aborts if any direction is within 0.1 m.
   2. LED headlights on.
@@ -36,11 +45,12 @@ logger = logging.getLogger(__name__)
 URI = "radio://0/1/250K"
 _LOG_FILE: Path = Path(__file__).parent / "logs" / "safe_fly_out_and_back.log"
 _TELEMETRY_FILE: Path = Path(__file__).parent / "logs" / "safe_fly_out_and_back_telemetry.csv"
-_COLLISION_RETURN_VELOCITY: float = 0.5  # m/s — slower than outbound for unmonitored return
+_COLLISION_RETURN_VELOCITY: float = 0.5  # m/s — NOTE: now 2x the 0.25 m/s outbound leg;
+# unmonitored return, deliberately left unchanged by the side-threshold reduction (see docstring)
 _COLLISION_BACKUP_M: float = 0.2  # back up before turning to gain extra clearance
 
 OUT_AND_BACK_PATH = [
-    FlightStep("forward", 3.0, velocity=0.3),
+    FlightStep("forward", 3.0, velocity=0.25),
 ]
 
 

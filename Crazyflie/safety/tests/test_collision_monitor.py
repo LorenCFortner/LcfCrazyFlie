@@ -799,6 +799,47 @@ class TestAvoidanceMoveFailure:
 
         assert eq.get_nowait() == "COLLISION"
 
+    def test_telemetry_still_recorded_when_avoidance_move_raises(
+        self, mock_scf, event_queue, mocker
+    ):
+        """A failed avoidance move is exactly the incident that most needs
+        its telemetry on disk (scripts/logs/right_wall_follow.log) - the
+        trigger/post_stop ranger frames must still reach the recorder even
+        though the move itself raised, not be silently dropped because they
+        sat after the failure point in the same try block.
+        """
+        mock_recorder = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        pre_stop_readings = _readings(left=0.05)
+        post_stop_readings = _readings(left=0.05)
+        mock_ranger.get_readings.side_effect = [pre_stop_readings, post_stop_readings]
+        mock_mc = mocker.MagicMock()
+        mock_mc.right.side_effect = Exception("boom")
+        monitor = CollisionMonitor(mock_scf, event_queue, recorder=mock_recorder)
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_recorder.record_ranger.assert_any_call(pre_stop_readings, None, 0.0, "trigger")
+        mock_recorder.record_ranger.assert_any_call(post_stop_readings, None, 0.0, "post_stop")
+
+    def test_telemetry_still_recorded_when_mc_stop_raises(self, mock_scf, event_queue, mocker):
+        """Narrower case: even when mc.stop() itself raises (no post_stop
+        reading is ever taken), the trigger reading must still be recorded.
+        """
+        mock_recorder = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        trigger_readings = _readings(left=0.05)
+        mock_ranger.get_readings.return_value = trigger_readings
+        mock_mc = mocker.MagicMock()
+        mock_mc.stop.side_effect = Exception("boom")
+        monitor = CollisionMonitor(mock_scf, event_queue, recorder=mock_recorder)
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        mock_recorder.record_ranger.assert_called_once_with(trigger_readings, None, 0.0, "trigger")
+
 
 # ---------------------------------------------------------------------------
 # FlightState integration - threshold passed to ranger each poll cycle

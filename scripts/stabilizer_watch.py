@@ -40,9 +40,11 @@ def main() -> None:
     A full INFO+ trace of every reading is written to _LOG_FILE (overwritten
     each run) as well as the console. Note this file grows for the entire
     session (not just one flight) since this script streams continuously
-    until interrupted. A row's age (time since the previous printed row) is
-    included so a silent freeze is visible directly, not just inferred from
-    unchanged values.
+    until interrupted. A row's age (time since the reading last actually
+    changed) is included so a silent freeze is visible directly -- a fixed
+    POLL_INTERVAL_S means every row is printed on the same cadence
+    regardless of whether the drone's log stream is still updating, so age
+    is tracked against the last *change* in state, not the last print.
     """
     logging.basicConfig(level=logging.ERROR)
     configure_run_logging(__name__, _LOG_FILE)
@@ -64,16 +66,20 @@ def main() -> None:
                     logger.error("No stabilizer reading received within 5 s - aborting.")
                     return
 
-                last_seen_time = time.monotonic()
+                last_changed_time = time.monotonic()
+                previous_snapshot: tuple[int, float, float, float] | None = None
                 while True:
-                    now = time.monotonic()
-                    age_s = now - last_seen_time
-                    last_seen_time = now
                     state = monitor.state
+                    snapshot = (state.height_mm, state.battery_v, state.roll_deg, state.pitch_deg)
+                    now = time.monotonic()
+                    if snapshot != previous_snapshot:
+                        last_changed_time = now
+                        previous_snapshot = snapshot
+                    age_s = now - last_changed_time
                     logger.info(
                         f"height={state.height_mm} mm  battery={state.battery_v:.2f} V"
                         f"  roll={state.roll_deg:.1f} deg  pitch={state.pitch_deg:.1f} deg"
-                        f"  (age {age_s:.2f} s)"
+                        f"  (unchanged for {age_s:.2f} s)"
                     )
                     time.sleep(POLL_INTERVAL_S)
             finally:

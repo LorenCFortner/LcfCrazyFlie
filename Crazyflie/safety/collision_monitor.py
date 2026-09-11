@@ -673,6 +673,13 @@ class CollisionMonitor:
         flight with no event ever posted, relying on MotionCommander's own
         context-exit landing instead of the documented safety path.
 
+        The stop/avoidance move itself is wrapped in its own inner
+        try/except, separate from telemetry recording: a failed avoidance
+        move is exactly the scenario whose telemetry matters most (it is
+        the collision event that needed a second look), so recording the
+        trigger/post_stop ranger frames must not be skipped just because
+        the move that preceded it raised.
+
         Separated from _run() so it can be exercised in unit tests
         without starting a real background thread.
 
@@ -692,43 +699,51 @@ class CollisionMonitor:
         try:
             with self._lock:
                 if self._mc is not None:
-                    self._mc.stop()
-                    # Fresh read used to decide the avoidance move - momentum
-                    # can carry the drone further before it actually
-                    # decelerates, so the decision uses where the drone is
-                    # now, not the trigger reading above.
-                    post_stop_readings = ranger.get_readings()
-                    flight_direction = self._effective_flight_direction()
-                    side_threshold = self._effective_side_threshold()
-                    direction = find_avoidance_move(
-                        post_stop_readings, flight_direction, threshold, side_threshold
-                    )
-                    if direction is None and flight_direction in _DIAGONAL_PAIRS:
-                        if flight_direction == "forward_left":
-                            # No single reverse of a diagonal - retreat away
-                            # from whichever leading sensor reads nearer the
-                            # obstacle.
-                            front_val = post_stop_readings.front
-                            left_val = post_stop_readings.left
-                            if front_val is not None and left_val is not None:
-                                direction = "back" if front_val <= left_val else "right"
-                        else:
-                            direction = _FLIGHT_DIR_REVERSE.get(flight_direction)
-                    if direction is not None:
-                        if self._flight_state is not None:
-                            velocity = self._flight_state.get_velocity()
-                            avoid_distance_m = max(_BASE_AVOID_M, velocity * _AVOID_REACTION_S)
-                            avoid_velocity = max(_MIN_AVOID_VELOCITY_M_S, velocity * 2.0)
-                        else:
-                            avoid_distance_m = _BASE_AVOID_M
-                            avoid_velocity = _FALLBACK_AVOID_VELOCITY
-                        logger.warning(
-                            "Avoidance: moving %s %.2f m at %.1f m/s",
-                            direction,
-                            avoid_distance_m,
-                            avoid_velocity,
+                    try:
+                        self._mc.stop()
+                        # Fresh read used to decide the avoidance move -
+                        # momentum can carry the drone further before it
+                        # actually decelerates, so the decision uses where
+                        # the drone is now, not the trigger reading above.
+                        post_stop_readings = ranger.get_readings()
+                        flight_direction = self._effective_flight_direction()
+                        side_threshold = self._effective_side_threshold()
+                        direction = find_avoidance_move(
+                            post_stop_readings, flight_direction, threshold, side_threshold
                         )
-                        getattr(self._mc, direction)(avoid_distance_m, velocity=avoid_velocity)
+                        if direction is None and flight_direction in _DIAGONAL_PAIRS:
+                            if flight_direction == "forward_left":
+                                # No single reverse of a diagonal - retreat
+                                # away from whichever leading sensor reads
+                                # nearer the obstacle.
+                                front_val = post_stop_readings.front
+                                left_val = post_stop_readings.left
+                                if front_val is not None and left_val is not None:
+                                    direction = "back" if front_val <= left_val else "right"
+                            else:
+                                direction = _FLIGHT_DIR_REVERSE.get(flight_direction)
+                        if direction is not None:
+                            if self._flight_state is not None:
+                                velocity = self._flight_state.get_velocity()
+                                avoid_distance_m = max(_BASE_AVOID_M, velocity * _AVOID_REACTION_S)
+                                avoid_velocity = max(_MIN_AVOID_VELOCITY_M_S, velocity * 2.0)
+                            else:
+                                avoid_distance_m = _BASE_AVOID_M
+                                avoid_velocity = _FALLBACK_AVOID_VELOCITY
+                            logger.warning(
+                                "Avoidance: moving %s %.2f m at %.1f m/s",
+                                direction,
+                                avoid_distance_m,
+                                avoid_velocity,
+                            )
+                            getattr(self._mc, direction)(avoid_distance_m, velocity=avoid_velocity)
+                    except Exception:
+                        # Caught here, separate from telemetry recording
+                        # below, so a failed stop/avoidance move - exactly
+                        # the collision event whose telemetry matters most -
+                        # never prevents the trigger/post_stop ranger frames
+                        # from still reaching the recorder.
+                        logger.exception("Collision avoidance move failed")
 
                 # Telemetry recorded last, strictly after mc.stop() and any
                 # avoidance move, so a disk write never delays a

@@ -67,51 +67,72 @@ false wall-lost stop -- see scripts/logs/right_wall_follow.log, 08:58:12
 run: front went permanently None mid-corner while right stayed valid, and
 wall_lost_timeout_s fired). right is unaffected by any of this: right is
 the wall actually being followed, so a missing right reading still means
-the wall is genuinely lost.
+the wall is genuinely lost. This point is unaffected by everything below --
+a missing front only ever substitutes MAX_RANGE_M into the heading,
+standoff and front-proximity-brake formula, exactly like any other far
+reading.
 
-What the loop *does* while front is missing depends on which kind of
-corner it is. At an inside (concave) corner the wall is still genuinely
-close on the right, and aggressively yawing toward it (front substituted
-with MAX_RANGE_M, flowing through the normal heading/standoff formula) is
-the right call -- that is what the 08:58:12 fix above restored. But at an
-outside (convex) corner, where the wall being followed ends and the drone
-flies past its outer apex, front also goes out of range (nothing ahead --
-the corner has opened into empty space) while right typically stays close
-to where it was for a while longer. Chasing the same MAX_RANGE_M-driven
-heading and standoff error here is wrong: it yaws hard toward where the
-old wall was *and* pushes hard laterally toward it (the standoff term
-blows up, since (MAX_RANGE_M + right) / 2 is far above
-target_wall_distance_m), and the drone ends up rotating/pushing too close
-before it can react, tripping CollisionMonitor (reported on hardware; no
-captured log for this specific incident yet).
+A large heading error -- front far ahead of right, whether front is
+literally missing (substituted with MAX_RANGE_M) or simply a real, valid,
+but large reading -- pins yaw_rate at its max_yaw_rate_deg_s clamp. Chasing
+that error unconditionally is wrong whenever there is no wall actually
+reachable on the diagonal: it yaws hard toward a heading that keeps not
+resolving *and* pushes hard laterally (the standoff term blows up, since
+(front_effective + right) / 2 is far above target_wall_distance_m), for as
+long as the error persists. Observed on hardware twice, in two different
+shapes: scripts/logs/right_wall_follow.log's 12:30 run (front missing) and
+its 15:17 run (front reading a real, valid 2.2-2.3 m the entire time,
+never None, against a right holding steady around 0.44-0.58 m) -- in the
+15:17 run, heading_error stayed near 1.8 m continuously for ~2 seconds,
+saturating yaw_rate at -45 deg/s the whole time (roughly a 90 degree
+rotation at full translational speed), until the sweep brought a surface
+into the front beam's narrow cone that a hardware operator identified as
+having already been close the entire time, just not detectable until the
+rotation exposed it -- front then read 0.201 m on the very next 100 ms
+poll, and both CollisionMonitor and WallFollower's own is_too_close()
+fired immediately, landing the flight (no hardware damage -- both
+backstops worked as designed).
 
-The two cases are distinguished by how right behaves, not by classifying
-the corner directly: while front is missing, the loop defaults to a
-straight-line hold -- continuing the current (front + left) diagonal at
-follow_velocity_m_s with yaw held at 0.0 and the standoff correction
-skipped -- until right itself increases by more than
-right_increasing_hysteresis_m versus the previous cycle's reading. That
-increase means the followed wall is now receding, i.e. the drone has
-passed an outside corner's outer apex, and only then does the old
-substitution-based formula resume, yawing hard toward front_effective to
-search for and reacquire the new wall face. See
-compute_follow_command()'s previous_right parameter; follow() tracks the
-last valid right reading across its loop and feeds it back in each cycle,
-the same way it already does for previous_v_follow.
+Since a missing front is only *one* way heading_error can become large
+enough to saturate yaw, the trigger for backing off is sustained yaw
+saturation itself, not front's validity: once the unclamped, heading-
+driven yaw rate's magnitude has been >= max_yaw_rate_deg_s for at least
+yaw_saturation_hold_s continuously, the loop concludes front isn't
+tracking a real, reachable wall and switches to a straight-line hold --
+continuing the current (front + left) diagonal at follow_velocity_m_s with
+yaw held at 0.0 and the standoff correction skipped -- rather than
+continuing to chase it. See compute_follow_command()'s saturated_cycles
+parameter; follow() tracks consecutive saturated cycles (while not already
+holding or reacquiring) and feeds the count back in each cycle, the same
+way it already does for previous_v_follow.
 
-Once reacquiring starts, it latches: a real-world receding trend can be
-gradual or noisy relative to the 10 Hz poll rate, so comparing only the
-single most recent cycle's delta against right_increasing_hysteresis_m
-could otherwise flip the loop back to holding straight mid-turn the
-instant one cycle's increase happened to fall short (or right ticked down
-slightly), then back to reacquiring the next -- chattering yaw between 0.0
-and -max_yaw_rate_deg_s while genuinely passing a corner. Once triggered,
-reacquire mode persists regardless of the current cycle's own delta until
-front is no longer missing (the new wall face has actually been found) or
-the wall is lost entirely (right missing). See
-compute_follow_command()'s previously_reacquiring parameter and
-FollowCommand.reacquiring; follow() tracks and feeds this back in each
-cycle the same way it does previous_v_follow and previous_right.
+Holding persists (see compute_follow_command()'s previously_holding
+parameter and FollowCommand.holding) until right itself increases by more
+than right_increasing_hysteresis_m versus the previous cycle's reading --
+that increase means the followed wall is now receding (e.g. the drone has
+passed an outside corner's outer apex), and only then does the loop
+transition to reacquiring: the normal substitution-based formula resumes,
+yawing hard toward front_effective to search for and reacquire a wall.
+Like the slew limit's previous_v_follow, this latches once triggered (see
+previously_reacquiring and FollowCommand.reacquiring) -- a real-world
+receding trend can be gradual or noisy relative to the 10 Hz poll rate, so
+comparing only the single most recent cycle's delta could otherwise flip
+the loop back to holding mid-turn the instant one cycle's increase fell
+short, chattering yaw between 0.0 and -max_yaw_rate_deg_s while genuinely
+passing a corner.
+
+Reacquiring itself exits once heading has genuinely converged -- the
+unclamped yaw rate is no longer saturated, meaning front and right are
+back in a normal following relationship -- at which point the loop resumes
+ordinary following outright. This convergence-based exit, rather than
+"front is no longer None", is precisely what the 15:17 incident's fix
+needed: front reading a real, valid-but-unhelpful value never made the old
+front-is-None gate release at all, so the same runaway rotation could
+recur indefinitely under the previous mechanism. See
+compute_follow_command()'s previously_holding/previously_reacquiring
+parameters and FollowCommand.holding/reacquiring; follow() tracks and
+feeds these back in each cycle the same way it does previous_v_follow and
+previous_right.
 
 Blade protection: full five-sensor CollisionMonitor detection stays active
 throughout (see Crazyflie.safety.collision_monitor's "forward_left" support)
@@ -223,11 +244,25 @@ class WallFollowConfig:
             threshold itself -- see compute_follow_command() and the module
             docstring.
         right_increasing_hysteresis_m: Minimum increase in right between
-            consecutive readings, while front is out of range, required to
+            consecutive readings, while holding or reacquiring, required to
             conclude the followed wall is receding (the drone has passed an
             outside corner's outer apex) rather than sensor noise -- see
             compute_follow_command()'s previous_right parameter and the
             module docstring.
+        yaw_saturation_hold_s: Duration yaw must remain clamped at
+            max_yaw_rate_deg_s continuously before concluding front isn't
+            tracking a real, reachable wall ahead and switching to the
+            straight-line hold -- see compute_follow_command()'s
+            saturated_cycles parameter and the module docstring. Deliberately
+            short (2 poll cycles at the default _POLL_INTERVAL_S): holding is
+            a safe, conservative state on its own (yaw simply stops chasing;
+            CollisionMonitor and this loop's own is_too_close() stay fully
+            active throughout), so there is no safety reason to wait
+            longer -- doing so would only reintroduce, for however long the
+            wait lasts, the exact aggressive yaw-and-push-toward-a-phantom-
+            wall behavior the 08:58:12 fix eliminated for a genuinely
+            missing front. The short duration still filters a single noisy
+            poll from triggering a hold on its own.
 
     Velocities are deliberately low. At follow_velocity_m_s = 0.15 m/s the
     estimated stopping distance (~4 cm, extrapolated from the repo's tuning
@@ -254,6 +289,7 @@ class WallFollowConfig:
     abort_distance_m: float = 0.25
     front_brake_zone_m: float = 0.15
     right_increasing_hysteresis_m: float = 0.05
+    yaw_saturation_hold_s: float = 0.20
 
 
 @dataclass
@@ -274,15 +310,28 @@ class FollowCommand:
             this back in as the next call's previous_v_follow to keep the
             slew limit continuous across follow()'s loop. Always 0.0 when
             wall_visible is False.
-        reacquiring: True while front is missing and right has been
+        holding: True while yaw has been saturated long enough to trigger
+            the straight-line hold and right has not yet been detected
+            receding -- feed this back in as the next call's
+            previously_holding to latch the hold across cycles. See
+            compute_follow_command()'s previously_holding parameter and the
+            module docstring.
+        reacquiring: True while holding or reacquiring and right has been
             detected receding (an outside corner's outer apex has been
             passed) -- feed this back in as the next call's
             previously_reacquiring to latch reacquire mode across cycles
             even if a later cycle's right delta dips back under
-            right_increasing_hysteresis_m. False whenever front is valid
-            (normal following) or right hasn't shown a receding trend yet
-            (still holding straight). See compute_follow_command()'s
-            previously_reacquiring parameter and the module docstring.
+            right_increasing_hysteresis_m. False once heading has converged
+            (ordinary following resumed) or while still holding straight.
+            See compute_follow_command()'s previously_reacquiring parameter
+            and the module docstring.
+        saturated_cycles: Consecutive prior cycles, while not holding or
+            reacquiring, where yaw was clamped at max_yaw_rate_deg_s -- feed
+            this back in as the next call's saturated_cycles to detect
+            sustained saturation across follow()'s loop. Always 0 while
+            holding or reacquiring (irrelevant once already handling a
+            large heading error) and reset to 0 whenever yaw is not
+            saturated.
     """
 
     vx: float
@@ -290,7 +339,9 @@ class FollowCommand:
     yaw_rate_deg_s: float
     wall_visible: bool
     v_follow: float = 0.0
+    holding: bool = False
     reacquiring: bool = False
+    saturated_cycles: int = 0
 
 
 class WallFollower:
@@ -326,14 +377,17 @@ class WallFollower:
         right: float | None,
         previous_v_follow: float | None = None,
         previous_right: float | None = None,
+        previously_holding: bool = False,
         previously_reacquiring: bool = False,
+        saturated_cycles: int = 0,
     ) -> FollowCommand:
         """Compute the velocity command for one control cycle.
 
         Pure function of the two sensor readings, previous_v_follow,
-        previous_right, previously_reacquiring, and this follower's config
-        -- see the module docstring for the geometry and error-signal
-        derivation, the forward-push slew limit, and the front-missing
+        previous_right, previously_holding, previously_reacquiring,
+        saturated_cycles, and this follower's config -- see the module
+        docstring for the geometry and error-signal derivation, the
+        forward-push slew limit, and the sustained-yaw-saturation
         straight-line-hold behavior.
 
         Args:
@@ -354,15 +408,23 @@ class WallFollower:
                 as before this parameter existed. follow() is the one that
                 tracks and passes the real previous cycle's value.
             previous_right: The right reading from the last cycle that had
-                a valid one. Only consulted while front is missing -- used
-                to detect whether right is now increasing (the followed
-                wall receding, i.e. an outside corner's outer apex has been
-                passed) by more than right_increasing_hysteresis_m. Defaults
-                to None, meaning "no trend data yet", which -- like a
-                stable or decreasing right -- holds a straight line rather
-                than chasing the substituted-MAX_RANGE_M heading/standoff
-                error. See the module docstring. follow() tracks and passes
-                the real previous cycle's last-valid right reading.
+                a valid one. Only consulted while holding or reacquiring --
+                used to detect whether right is now increasing (the
+                followed wall receding, i.e. an outside corner's outer apex
+                has been passed) by more than right_increasing_hysteresis_m.
+                Defaults to None, meaning "no trend data yet", which --
+                like a stable or decreasing right -- keeps holding rather
+                than transitioning to reacquiring. See the module
+                docstring. follow() tracks and passes the real previous
+                cycle's last-valid right reading.
+            previously_holding: Whether the *previous* cycle was already
+                holding (see FollowCommand.holding). When True, this cycle
+                stays in hold or reacquire handling regardless of this
+                cycle's own saturation state -- holding forces yaw_rate to
+                0.0, which is never itself saturated, so re-evaluating
+                saturation from scratch every cycle would immediately (and
+                incorrectly) look "resolved". Defaults to False. follow()
+                tracks and passes the real previous cycle's value.
             previously_reacquiring: Whether the *previous* cycle was
                 already reacquiring (see FollowCommand.reacquiring). When
                 True, this cycle stays in reacquire mode regardless of
@@ -370,27 +432,38 @@ class WallFollower:
                 right_increasing_hysteresis_m -- a real receding trend can
                 be gradual or noisy relative to the poll rate, and without
                 this latch a single slow/negative-delta cycle would flip
-                the loop back to holding straight mid-turn. Defaults to
-                False. Reset automatically once front is no longer missing
-                (see FollowCommand.reacquiring). follow() tracks and passes
-                the real previous cycle's value.
+                the loop back to holding mid-turn. Defaults to False. Reset
+                automatically once heading has converged (see
+                FollowCommand.reacquiring). follow() tracks and passes the
+                real previous cycle's value.
+            saturated_cycles: Consecutive prior cycles, while not holding
+                or reacquiring, where yaw was clamped at max_yaw_rate_deg_s.
+                Only relevant when not already holding or reacquiring --
+                used to detect sustained saturation
+                (saturated_cycles * _POLL_INTERVAL_S >= yaw_saturation_hold_s)
+                and enter the straight-line hold. Defaults to 0. follow()
+                tracks and passes the real previous cycle's value (see
+                FollowCommand.saturated_cycles).
 
         Returns:
             FollowCommand with wall_visible=False (and all-zero velocity,
             including v_follow) when right is missing; otherwise a live
             command, clamped to max_velocity_m_s and max_yaw_rate_deg_s.
-            When front is valid, this is the normal heading + standoff
-            correction (reacquiring=False). When front is missing and not
-            (yet, or still) reacquiring (see previous_right and
-            previously_reacquiring above), this is instead a straight-line
-            hold: yaw_rate_deg_s=0.0 and no standoff correction, so vx
-            equals vy exactly. When front is missing and reacquiring, the
-            normal formula resumes using front substituted with
-            MAX_RANGE_M -- typically a hard yaw back toward where the wall
-            was, to search for the next wall face. The forward-push term
-            is throttled by front proximity and slew-limited on the way
-            back up in every case -- see front_brake_zone_m and
-            previous_v_follow above.
+            Ordinarily (not holding, not reacquiring) this is the normal
+            heading + standoff correction. Once yaw has been saturated for
+            yaw_saturation_hold_s continuously (see saturated_cycles above),
+            this is instead a straight-line hold: yaw_rate_deg_s=0.0 and no
+            standoff correction, so vx equals vy exactly
+            (holding=True). Holding transitions to reacquiring once right
+            is observed receding (see previous_right above): the normal
+            formula resumes using front substituted with MAX_RANGE_M when
+            missing -- typically a hard yaw back toward where the wall was,
+            to search for the next wall face (reacquiring=True). Reacquiring
+            exits back to ordinary following once yaw is no longer
+            saturated (heading has converged). The forward-push term is
+            throttled by front proximity and slew-limited on the way back
+            up in every case -- see front_brake_zone_m and previous_v_follow
+            above.
         """
         cfg = self._config
         if right is None or right <= 0.0:
@@ -398,44 +471,70 @@ class WallFollower:
 
         # A missing/invalid front means "nothing within MAX_RANGE_M", per
         # Crazyflie.decks.multi_ranger's own convention (None is not a
-        # fault) -- substitute that distance so the front-proximity brake
-        # below reacts to it like any other far reading (full speed, no
-        # braking). Whether the *heading/standoff* formula also reacts to
-        # this substituted value depends on corner_hold below -- see the
-        # module docstring's front-missing paragraph.
-        front_missing = front is None or front <= 0.0
+        # fault) -- substitute that distance so the heading/standoff
+        # formula and the front-proximity brake below react to it like any
+        # other far reading. See the module docstring's front-missing
+        # paragraph.
         front_effective = front if front is not None and front > 0.0 else MAX_RANGE_M
 
-        # Only relevant while front is missing: right increasing means the
-        # followed wall is now receding (an outside corner's outer apex has
-        # been passed), which is when it becomes correct to resume
-        # aggressively searching for the next wall face -- see the module
-        # docstring. previously_reacquiring latches this True once
-        # detected, regardless of this cycle's own delta, so a gradual or
-        # noisy real-world increase doesn't chatter the loop between
-        # holding straight and yawing hard cycle to cycle. Without trend
-        # data (previous_right is None, e.g. the very first cycle) this
-        # defaults to "not receding", the same conservative straight-line
-        # hold as a stable or decreasing right.
-        right_receding = front_missing and (
-            previously_reacquiring
-            or (
-                previous_right is not None
-                and (right - previous_right) > cfg.right_increasing_hysteresis_m
-            )
-        )
-        corner_hold = front_missing and not right_receding
-        reacquiring = front_missing and right_receding
+        heading_error = front_effective - right
+        standoff_error = (front_effective + right) / 2.0 - cfg.target_wall_distance_m
+        unclamped_yaw_rate = -cfg.yaw_gain_deg_per_m * heading_error
+        is_saturated = abs(unclamped_yaw_rate) >= cfg.max_yaw_rate_deg_s
 
-        if corner_hold:
+        # right increasing means the followed wall is now receding (an
+        # outside corner's outer apex has been passed), which is when it
+        # becomes correct to resume aggressively searching for the next
+        # wall face -- see the module docstring. previously_reacquiring
+        # latches this True once detected, regardless of this cycle's own
+        # delta, so a gradual or noisy real-world increase doesn't chatter
+        # the loop between holding and reacquiring cycle to cycle. Without
+        # trend data (previous_right is None) this defaults to "not
+        # receding", the same conservative hold as a stable or decreasing
+        # right.
+        right_receding = previously_reacquiring or (
+            previous_right is not None
+            and (right - previous_right) > cfg.right_increasing_hysteresis_m
+        )
+
+        was_handling = previously_holding or previously_reacquiring
+        if was_handling:
+            if right_receding and not is_saturated:
+                # Converged while reacquiring: heading has genuinely
+                # resolved -- exit hold/reacquire handling entirely and
+                # resume ordinary following. This is the fix for the 15:17
+                # incident: exit is keyed off real convergence, not merely
+                # "front is no longer missing" (which a real, valid, but
+                # still-unhelpful front reading could satisfy without
+                # anything having actually resolved).
+                holding = False
+                reacquiring = False
+            elif right_receding:
+                holding = False
+                reacquiring = True
+            else:
+                holding = True
+                reacquiring = False
+            saturated_cycles_out = 0
+        else:
+            new_saturated_cycles = saturated_cycles + 1 if is_saturated else 0
+            sustained = (new_saturated_cycles * _POLL_INTERVAL_S) >= cfg.yaw_saturation_hold_s
+            if sustained:
+                holding = True
+                reacquiring = False
+                saturated_cycles_out = 0
+            else:
+                holding = False
+                reacquiring = False
+                saturated_cycles_out = new_saturated_cycles
+
+        if holding:
             yaw_rate = 0.0
             v_correct = 0.0
         else:
-            heading_error = front_effective - right
-            standoff_error = (front_effective + right) / 2.0 - cfg.target_wall_distance_m
-
-            yaw_rate = -cfg.yaw_gain_deg_per_m * heading_error
-            yaw_rate = max(-cfg.max_yaw_rate_deg_s, min(cfg.max_yaw_rate_deg_s, yaw_rate))
+            yaw_rate = max(
+                -cfg.max_yaw_rate_deg_s, min(cfg.max_yaw_rate_deg_s, unclamped_yaw_rate)
+            )
             v_correct = cfg.standoff_gain * standoff_error
 
         # Front-proximity brake: mirrors CollisionMonitor's own leading-sensor
@@ -483,7 +582,9 @@ class WallFollower:
             yaw_rate_deg_s=yaw_rate,
             wall_visible=True,
             v_follow=v_follow,
+            holding=holding,
             reacquiring=reacquiring,
+            saturated_cycles=saturated_cycles_out,
         )
 
     def is_aligned(self, front: float | None, right: float | None) -> bool:
@@ -654,7 +755,9 @@ class WallFollower:
         last_wall_seen_time = start_time
         previous_v_follow = 0.0  # Real velocity starts at 0.0 when follow() begins.
         previous_right: float | None = None  # No trend data yet -- see module docstring.
+        previously_holding = False  # See FollowCommand.holding.
         previously_reacquiring = False  # See FollowCommand.reacquiring.
+        saturated_cycles = 0  # See FollowCommand.saturated_cycles.
 
         while True:
             if should_abort is not None and should_abort():
@@ -676,10 +779,14 @@ class WallFollower:
                 readings.right,
                 previous_v_follow,
                 previous_right,
+                previously_holding,
                 previously_reacquiring,
+                saturated_cycles,
             )
             previous_v_follow = command.v_follow
+            previously_holding = command.holding
             previously_reacquiring = command.reacquiring
+            saturated_cycles = command.saturated_cycles
             if readings.right is not None and readings.right > 0.0:
                 previous_right = readings.right
             now = time.monotonic()

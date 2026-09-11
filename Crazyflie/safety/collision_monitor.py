@@ -9,8 +9,17 @@ Detection threshold scales with the current flight velocity:
 Side (non-leading) sensors use a separate, additive threshold so a
 translating drone still has stopping room laterally, not just ahead:
     side_threshold = SIDE_CLEARANCE_M + velocity * REACTION_S
-See CollisionMonitor._effective_side_threshold for why this must be
-additive rather than max().
+This only applies while actively wall-following ("forward_left"), where a
+standoff controller is deliberately pushing the drone toward a wall it is
+holding close to - every other flight direction (plain "forward", "back",
+"left", "right", a path leg, a search leg, ...) uses the flat
+SIDE_CLEARANCE_M floor instead, since nothing is intentionally driving the
+drone sideways and the extra stopping-distance margin made an ordinary
+doorway impassable (observed on hardware: a 30-inch/0.76 m doorway gives
+only ~0.38 m to each side wall when centered, well inside the additive
+threshold's ~0.30 m margin at typical search speed). See
+CollisionMonitor._effective_side_threshold for why the additive form itself
+must be additive rather than max(), and for the forward_left gating.
 
 On collision:
   1. Calls mc.stop() immediately so physical movement ceases.
@@ -79,6 +88,24 @@ MAX_SAFE_VELOCITY_M_S: float = 0.83
 # Fallback avoidance velocity used when no FlightState is provided.
 # Preserves the original hardcoded behavior for backward compatibility.
 _FALLBACK_AVOID_VELOCITY: float = 0.6
+
+# Floor for avoidance velocity so the avoidance move's own duration stays
+# bounded even as commanded velocity approaches zero (e.g. WallFollower's
+# front-proximity brake deliberately drives velocity toward 0 near a
+# collision - see Crazyflie.flight.wall_follower's front_brake_zone_m).
+# Without this floor, avoid_velocity = velocity * 2.0 could approach 0,
+# making the avoidance move's blocking duration (avoid_distance_m /
+# avoid_velocity) unbounded - observed on hardware: a 0.20 m move at a
+# resulting 0.1 m/s avoid_velocity took 2.0 s, exceeding
+# flight_lifecycle.EVENT_WAIT_TIMEOUT_S (1.5 s). The main thread gave up
+# waiting for the "COLLISION" event, returned, and
+# MotionCommander.__exit__()'s own land() call raced this thread's
+# still-in-progress avoidance move on the same MotionCommander object,
+# crashing it (cflib raised "Can not move on the ground. Take off first!").
+# With this floor, worst-case avoidance duration is _BASE_AVOID_M /
+# _MIN_AVOID_VELOCITY_M_S = 0.20 / 0.3 ~= 0.67 s, comfortably under the
+# 1.5 s timeout.
+_MIN_AVOID_VELOCITY_M_S: float = 0.3
 
 # Fixed blade-clearance for non-flight-direction sensors.
 # Blade tips are ~5 cm from each sensor face; 5 cm × 2 sides = 10 cm minimum.
@@ -431,8 +458,26 @@ class CollisionMonitor:
     def _effective_side_threshold(self) -> float:
         """Return the trigger threshold for non-leading ("side") sensors.
 
-        Computed additively - ``_SIDE_CLEARANCE_M + velocity * _REACTION_S``
-        - rather than as ``max(_SIDE_CLEARANCE_M, ...)``. ``_SIDE_CLEARANCE_M``
+        The additive, velocity-scaled formula - ``_SIDE_CLEARANCE_M +
+        velocity * _REACTION_S`` - only applies while actively wall-following
+        (flight direction "forward_left"), where WallFollower's standoff
+        controller is deliberately steering the drone toward the wall it is
+        holding close to, so extra lateral stopping room genuinely matters.
+        Every other direction ("forward", "back", "left", "right", a
+        SafeFlightController path leg, the wall-follow search leg, None,
+        ...) has nothing intentionally driving the drone sideways, so it
+        gets the flat `_SIDE_CLEARANCE_M` floor instead - the same
+        blade-contact minimum used when no FlightState is present at all.
+
+        Applying the additive formula to every direction (the original
+        design) made ordinary doorway transit impossible: at
+        approach_velocity_m_s = 0.30 the additive side threshold is ~0.295 m
+        per side, leaving only ~9 cm of margin through a 30-inch (0.76 m)
+        doorway even when perfectly centered - not enough to survive any
+        real drift or sensor noise. See the module docstring.
+
+        Within "forward_left", the formula is computed additively -
+        rather than as ``max(_SIDE_CLEARANCE_M, ...)``. ``_SIDE_CLEARANCE_M``
         is the blade-contact floor, a distance to *stop at*, not a distance
         to *start braking at*; a `max()` formula would collapse to exactly
         the floor for any speed below the crossover (~0.154 m/s) and give a
@@ -445,12 +490,16 @@ class CollisionMonitor:
         on its own resting surroundings.
 
         Returns:
-            `_SIDE_CLEARANCE_M + velocity * _REACTION_S` from FlightState, or
-            the static `_SIDE_CLEARANCE_M` when no FlightState is present.
+            `_SIDE_CLEARANCE_M + velocity * _REACTION_S` while actively
+            wall-following ("forward_left"); the static `_SIDE_CLEARANCE_M`
+            for every other direction (including None), or when no
+            FlightState is present at all.
         """
-        if self._flight_state is not None:
-            return _SIDE_CLEARANCE_M + self._flight_state.get_velocity() * _REACTION_S
-        return _SIDE_CLEARANCE_M
+        if self._flight_state is None:
+            return _SIDE_CLEARANCE_M
+        if self._effective_flight_direction() != "forward_left":
+            return _SIDE_CLEARANCE_M
+        return _SIDE_CLEARANCE_M + self._flight_state.get_velocity() * _REACTION_S
 
     def _effective_velocity(self) -> float:
         """Return the current commanded velocity from FlightState, or 0.0.
@@ -545,9 +594,10 @@ class CollisionMonitor:
 
         When FlightState is provided, uses per-sensor directional logic:
         the flight-direction sensor(s) use the dynamic velocity-based
-        threshold; all other sensors use the additive, velocity-scaled side
-        threshold (see _effective_side_threshold - _SIDE_CLEARANCE_M plus a
-        term that grows with velocity, not the flat floor alone).
+        threshold; all other sensors use _effective_side_threshold - the
+        additive, velocity-scaled side threshold while actively
+        wall-following ("forward_left"), or the flat _SIDE_CLEARANCE_M floor
+        for every other direction.
 
         When FlightState is None (backward-compat mode), falls back to
         ranger.is_obstacle_within with the static min_distance_m.
@@ -571,8 +621,9 @@ class CollisionMonitor:
         Applies the same directional logic as _obstacle_detected but with
         each per-sensor threshold scaled by 1.5 to give early warning.
         The flight-direction sensor(s) warn at dynamic_threshold × 1.5; all
-        other sensors warn at the additive, velocity-scaled side threshold
-        (_effective_side_threshold) × 1.5, not the flat _SIDE_CLEARANCE_M × 1.5.
+        other sensors warn at _effective_side_threshold × 1.5 - the
+        additive, velocity-scaled margin while actively wall-following, or
+        the flat _SIDE_CLEARANCE_M × 1.5 for every other direction.
 
         Args:
             readings: Current MultiRangerReadings snapshot.
@@ -611,6 +662,17 @@ class CollisionMonitor:
         avoidance decision should reflect where the drone is now, not where
         it was when detection fired.
 
+        The collision response (stop, avoidance move, telemetry) is
+        best-effort: if any part of it raises - e.g. a race with the
+        flight's own MotionCommander context exiting concurrently and
+        landing while this avoidance move is still in progress on this
+        background thread - the failure is logged, but "COLLISION" is
+        still posted to event_queue in a finally so the main thread's
+        should_abort()/handle_safety_events() safety path always fires.
+        Without this, a failed avoidance move would silently strand the
+        flight with no event ever posted, relying on MotionCommander's own
+        context-exit landing instead of the documented safety path.
+
         Separated from _run() so it can be exercised in unit tests
         without starting a real background thread.
 
@@ -627,52 +689,57 @@ class CollisionMonitor:
 
         post_stop_readings: MultiRangerReadings | None = None
 
-        with self._lock:
-            if self._mc is not None:
-                self._mc.stop()
-                # Fresh read used to decide the avoidance move - momentum can
-                # carry the drone further before it actually decelerates, so
-                # the decision uses where the drone is now, not the trigger
-                # reading above.
-                post_stop_readings = ranger.get_readings()
-                flight_direction = self._effective_flight_direction()
-                side_threshold = self._effective_side_threshold()
-                direction = find_avoidance_move(
-                    post_stop_readings, flight_direction, threshold, side_threshold
-                )
-                if direction is None and flight_direction in _DIAGONAL_PAIRS:
-                    if flight_direction == "forward_left":
-                        # No single reverse of a diagonal - retreat away from
-                        # whichever leading sensor reads nearer the obstacle.
-                        front_val = post_stop_readings.front
-                        left_val = post_stop_readings.left
-                        if front_val is not None and left_val is not None:
-                            direction = "back" if front_val <= left_val else "right"
-                    else:
-                        direction = _FLIGHT_DIR_REVERSE.get(flight_direction)
-                if direction is not None:
-                    if self._flight_state is not None:
-                        velocity = self._flight_state.get_velocity()
-                        avoid_distance_m = max(_BASE_AVOID_M, velocity * _AVOID_REACTION_S)
-                        avoid_velocity = velocity * 2.0
-                    else:
-                        avoid_distance_m = _BASE_AVOID_M
-                        avoid_velocity = _FALLBACK_AVOID_VELOCITY
-                    logger.warning(
-                        "Avoidance: moving %s %.2f m at %.1f m/s",
-                        direction,
-                        avoid_distance_m,
-                        avoid_velocity,
+        try:
+            with self._lock:
+                if self._mc is not None:
+                    self._mc.stop()
+                    # Fresh read used to decide the avoidance move - momentum
+                    # can carry the drone further before it actually
+                    # decelerates, so the decision uses where the drone is
+                    # now, not the trigger reading above.
+                    post_stop_readings = ranger.get_readings()
+                    flight_direction = self._effective_flight_direction()
+                    side_threshold = self._effective_side_threshold()
+                    direction = find_avoidance_move(
+                        post_stop_readings, flight_direction, threshold, side_threshold
                     )
-                    getattr(self._mc, direction)(avoid_distance_m, velocity=avoid_velocity)
+                    if direction is None and flight_direction in _DIAGONAL_PAIRS:
+                        if flight_direction == "forward_left":
+                            # No single reverse of a diagonal - retreat away
+                            # from whichever leading sensor reads nearer the
+                            # obstacle.
+                            front_val = post_stop_readings.front
+                            left_val = post_stop_readings.left
+                            if front_val is not None and left_val is not None:
+                                direction = "back" if front_val <= left_val else "right"
+                        else:
+                            direction = _FLIGHT_DIR_REVERSE.get(flight_direction)
+                    if direction is not None:
+                        if self._flight_state is not None:
+                            velocity = self._flight_state.get_velocity()
+                            avoid_distance_m = max(_BASE_AVOID_M, velocity * _AVOID_REACTION_S)
+                            avoid_velocity = max(_MIN_AVOID_VELOCITY_M_S, velocity * 2.0)
+                        else:
+                            avoid_distance_m = _BASE_AVOID_M
+                            avoid_velocity = _FALLBACK_AVOID_VELOCITY
+                        logger.warning(
+                            "Avoidance: moving %s %.2f m at %.1f m/s",
+                            direction,
+                            avoid_distance_m,
+                            avoid_velocity,
+                        )
+                        getattr(self._mc, direction)(avoid_distance_m, velocity=avoid_velocity)
 
-            # Telemetry recorded last, strictly after mc.stop() and any
-            # avoidance move, so a disk write never delays a time-critical
-            # command.
-            self._record_ranger(trigger_readings, context="trigger")
-            if post_stop_readings is not None:
-                self._record_ranger(post_stop_readings, context="post_stop")
-        self._event_queue.put("COLLISION")
+                # Telemetry recorded last, strictly after mc.stop() and any
+                # avoidance move, so a disk write never delays a
+                # time-critical command.
+                self._record_ranger(trigger_readings, context="trigger")
+                if post_stop_readings is not None:
+                    self._record_ranger(post_stop_readings, context="post_stop")
+        except Exception:
+            logger.exception("Collision response failed")
+        finally:
+            self._event_queue.put("COLLISION")
 
     @staticmethod
     def _any_below_blade_clearance(readings: MultiRangerReadings) -> bool:

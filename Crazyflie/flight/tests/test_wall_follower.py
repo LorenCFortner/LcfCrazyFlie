@@ -9,6 +9,7 @@ import pytest
 
 from Crazyflie.decks.multi_ranger import MAX_RANGE_M, MultiRangerReadings
 from Crazyflie.flight.wall_follower import (
+    _POLL_INTERVAL_S,
     FLIGHT_DIRECTION,
     FollowCommand,
     WallFollowConfig,
@@ -285,6 +286,103 @@ class TestFrontProximityBrake:
 
         assert _front_threshold(cfg) == pytest.approx(0.25)
         assert _front_threshold(cfg) + cfg.front_brake_zone_m == pytest.approx(0.40)
+
+
+# ---------------------------------------------------------------------------
+# Forward-push slew limit -- v_follow may drop instantly (braking, safety
+# critical) but may only climb by a bounded step per call (recovering after
+# a brake). Regression for scripts/logs/right_wall_follow.log's 12:30 run:
+# front flickered between "clear" (2+ m) and "close" (0.26-0.5 m) within
+# single 100 ms polls as the yaw correction swept past a corner edge -- each
+# "clear" flicker snapped front_scale back to 1.0 and the loop immediately
+# re-commanded full follow_velocity_m_s, so the flicker right before impact
+# didn't leave enough margin to brake again in time. previous_v_follow=None
+# (the default) means "no slew limit" -- a single, isolated call to this
+# pure function behaves exactly as before; follow() is the one that
+# maintains and passes the real previous_v_follow across its 10 Hz loop.
+# ---------------------------------------------------------------------------
+
+
+class TestForwardPushSlewLimit:
+    def _max_step(self, cfg: WallFollowConfig) -> float:
+        return (cfg.follow_velocity_m_s / _REACTION_S) * _POLL_INTERVAL_S
+
+    def test_default_previous_v_follow_is_unlimited(self):
+        """A bare call (no previous_v_follow) is not slew-limited -- this is
+        the existing pure-function contract every other test in this file
+        relies on.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        right = 0.60
+        front = _front_threshold(cfg) + cfg.front_brake_zone_m  # front_scale == 1.0
+
+        command = follower.compute_follow_command(front=front, right=right)
+
+        assert command.v_follow == pytest.approx(cfg.follow_velocity_m_s)
+
+    def test_braking_is_instant_regardless_of_previous_v_follow(self):
+        """Dropping to a lower target must never be delayed -- braking is
+        the safety-critical direction.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        right = 0.60
+        front = _front_threshold(cfg)  # front_scale == 0.0 -> target v_follow == 0.0
+
+        command = follower.compute_follow_command(
+            front=front, right=right, previous_v_follow=cfg.follow_velocity_m_s
+        )
+
+        assert command.v_follow == pytest.approx(0.0)
+
+    def test_recovery_to_full_speed_is_capped_per_cycle(self):
+        """Recovering from a full brake (previous_v_follow=0.0) to a fully
+        open front_scale must not snap straight to follow_velocity_m_s in
+        one call -- it climbs by at most one slew step.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        right = 0.60
+        front = _front_threshold(cfg) + cfg.front_brake_zone_m  # front_scale == 1.0
+
+        command = follower.compute_follow_command(front=front, right=right, previous_v_follow=0.0)
+
+        assert command.v_follow == pytest.approx(self._max_step(cfg))
+        assert command.v_follow < cfg.follow_velocity_m_s
+
+    def test_recovery_does_not_overshoot_target_within_one_step(self):
+        """Once previous_v_follow is already within one slew step of the
+        target, the result lands exactly on the target -- it must not
+        overshoot past it.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        right = 0.60
+        front = _front_threshold(cfg) + cfg.front_brake_zone_m  # target == follow_velocity_m_s
+        previous = cfg.follow_velocity_m_s - (self._max_step(cfg) / 2.0)
+
+        command = follower.compute_follow_command(
+            front=front, right=right, previous_v_follow=previous
+        )
+
+        assert command.v_follow == pytest.approx(cfg.follow_velocity_m_s)
+
+    def test_repeated_full_speed_calls_stay_at_target_not_dropping(self):
+        """Steady state: once v_follow has reached the target, further calls
+        at the same front/right must not drift below it -- confirms the
+        slew clamp only limits increases, never holds a value down.
+        """
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        right = 0.60
+        front = _front_threshold(cfg) + cfg.front_brake_zone_m
+
+        command = follower.compute_follow_command(
+            front=front, right=right, previous_v_follow=cfg.follow_velocity_m_s
+        )
+
+        assert command.v_follow == pytest.approx(cfg.follow_velocity_m_s)
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +822,51 @@ class TestFollow:
 
         assert state.get_direction() == FLIGHT_DIRECTION
         assert state.get_velocity() > 0.0
+
+    def test_front_flicker_does_not_snap_back_to_full_speed(self, mocker):
+        """Regression for scripts/logs/right_wall_follow.log's 12:30 run:
+        front flickered clear-close-clear-close within single 100 ms polls
+        at a corner. The forward-push component of the very next command
+        after a "clear" poll immediately following a "close" one must not
+        jump straight back to follow_velocity_m_s -- follow() must carry
+        the previous cycle's v_follow across iterations so the slew limit
+        actually applies during a real flight, not just in isolated calls
+        to compute_follow_command.
+        """
+        cfg = WallFollowConfig(follow_duration_s=100.0)
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        right = cfg.target_wall_distance_m
+        clear_front = _front_threshold(cfg) + cfg.front_brake_zone_m + 1.0  # front_scale == 1.0
+        close_front = _front_threshold(cfg)  # front_scale == 0.0
+        readings_sequence = [
+            _readings(front=clear_front, right=right),
+            _readings(front=close_front, right=right),
+            _readings(front=clear_front, right=right),  # the flicker back to "clear"
+        ]
+        mock_ranger.get_readings.side_effect = readings_sequence
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        # should_abort() is called twice per iteration (top-of-loop and
+        # again immediately before the motion command) -- allow exactly
+        # len(readings_sequence) full iterations before returning True.
+        call_count = {"n": 0}
+
+        def should_abort() -> bool:
+            call_count["n"] += 1
+            return call_count["n"] > len(readings_sequence) * 2
+
+        follower.follow(mock_mc, mock_ranger, should_abort=should_abort)
+
+        vx_values = [call.args[0] for call in mock_mc.start_linear_motion.call_args_list]
+        assert len(vx_values) == len(readings_sequence)
+        unbraked_vx, _ = _unbraked_vx_vy(cfg, clear_front, right)
+        # Cycle 3's vx (post-flicker, previous_v_follow braked to 0.0 by
+        # cycle 2) must be well short of the fully-open unbraked vx -- if
+        # the brake had snapped straight back to full speed on the single
+        # "clear" poll, it would equal unbraked_vx instead.
+        assert vx_values[2] < unbraked_vx
 
     def test_stop_called_exactly_once_on_normal_abort(self, mocker):
         follower = WallFollower(WallFollowConfig())

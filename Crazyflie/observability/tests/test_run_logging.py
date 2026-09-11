@@ -10,6 +10,7 @@ same reason.
 """
 
 import logging
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -161,6 +162,82 @@ def test_sets_crazyflie_package_logger_to_file_level(mock_logging, tmp_path):
     configure_run_logging("my.script", tmp_path / "logs" / "run.log", file_level=logging.DEBUG)
 
     mock_logging["named_loggers"]["Crazyflie"].setLevel.assert_called_once_with(logging.DEBUG)
+
+
+# ---------------------------------------------------------------------------
+# Uncaught background-thread exceptions - must reach the log file, not just
+# stderr (Python's default threading.excepthook only prints there, so a
+# CollisionMonitor/StabilizerMonitor/LinkMonitor background thread crashing
+# would otherwise leave no trace in the run's own log).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def restore_threading_excepthook():
+    """threading.excepthook is process-global state - restore it after
+    every test so this file's own tests don't leak into others.
+    """
+    original = threading.excepthook
+    yield
+    threading.excepthook = original
+
+
+def test_installs_a_threading_excepthook(mock_logging, tmp_path):
+    configure_run_logging("my.script", tmp_path / "logs" / "run.log")
+
+    assert threading.excepthook is run_logging_module._log_thread_exception
+
+
+def test_thread_exception_hook_logs_via_crazyflie_logger_with_traceback(mock_logging, tmp_path):
+    configure_run_logging("my.script", tmp_path / "logs" / "run.log")
+
+    expected_exc_info: tuple[object, object, object] = (None, None, None)
+    try:
+        raise ValueError("boom")
+    except ValueError as exc:
+        expected_exc_info = (ValueError, exc, exc.__traceback__)
+        args = threading.ExceptHookArgs(
+            (ValueError, exc, exc.__traceback__, threading.current_thread())
+        )
+
+    threading.excepthook(args)
+
+    crazyflie_logger = mock_logging["named_loggers"]["Crazyflie"]
+    crazyflie_logger.critical.assert_called_once()
+    _, kwargs = crazyflie_logger.critical.call_args
+    assert kwargs["exc_info"] == expected_exc_info
+
+
+def test_thread_exception_hook_includes_thread_name(mock_logging, tmp_path):
+    configure_run_logging("my.script", tmp_path / "logs" / "run.log")
+
+    fake_thread = threading.Thread(name="CollisionMonitor-poll")
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        args = threading.ExceptHookArgs((RuntimeError, exc, exc.__traceback__, fake_thread))
+
+    threading.excepthook(args)
+
+    crazyflie_logger = mock_logging["named_loggers"]["Crazyflie"]
+    call_args = crazyflie_logger.critical.call_args
+    assert "CollisionMonitor-poll" in call_args.args
+
+
+def test_thread_exception_hook_handles_missing_exc_info_without_raising(mock_logging, tmp_path):
+    """threading.ExceptHookArgs technically allows exc_type/exc_value to be
+    None -- confirm the hook degrades to a plain log message instead of
+    raising when that happens, rather than assuming real callers.
+    """
+    configure_run_logging("my.script", tmp_path / "logs" / "run.log")
+    args = threading.ExceptHookArgs((None, None, None, threading.current_thread()))
+
+    threading.excepthook(args)  # should not raise
+
+    crazyflie_logger = mock_logging["named_loggers"]["Crazyflie"]
+    crazyflie_logger.critical.assert_called_once()
+    _, kwargs = crazyflie_logger.critical.call_args
+    assert "exc_info" not in kwargs
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,13 @@ INFO+ trace to a log file - so a run's detail (flight progress, collision
 response, retrace decisions) is always available on disk. configure_run_logging()
 does all of that in one call.
 
+It also installs a threading.excepthook (see _log_thread_exception) so an
+uncaught exception on any background thread (CollisionMonitor's avoidance
+move, StabilizerMonitor's/LinkMonitor's poll loop, ...) is logged through
+the same file and console output as everything else, instead of Python's
+default behavior of only printing it to stderr - which would otherwise
+leave a crashed safety thread with no trace in the run's own log.
+
 configure_run_logging() only adjusts handlers/levels - it never calls
 logging.basicConfig() itself, since only a script's own main() should do
 that (see .claude/rules/crazyflie/naming-and-structure.md). Call
@@ -18,6 +25,7 @@ Example:
 """
 
 import logging
+import threading
 from pathlib import Path
 
 _CFLIB_LOGGER_NAME: str = "cflib"
@@ -29,6 +37,39 @@ _FILE_LOG_FORMAT: str = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 # accumulating handlers. Module-level by design: there is exactly one
 # "current run's log file" per process.
 _active_file_handler: logging.Handler | None = None
+
+
+def _log_thread_exception(args: threading.ExceptHookArgs) -> None:
+    """threading.excepthook replacement: route uncaught background-thread
+    exceptions through logging instead of only printing to stderr.
+
+    Python's default threading.excepthook prints the traceback to stderr
+    and nothing else - a background thread (CollisionMonitor's avoidance
+    move, StabilizerMonitor's/LinkMonitor's poll loop, ...) that raises
+    would otherwise leave no trace in the run's own log file, even though
+    every other error path in this project logs through the same file.
+
+    Args:
+        args: threading.ExceptHookArgs (exc_type, exc_value, exc_traceback,
+            thread) supplied by the threading module when a thread's target
+            raises without catching it.
+    """
+    thread_name = args.thread.name if args.thread is not None else "unknown"
+    logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
+    if args.exc_type is not None and args.exc_value is not None:
+        logger.critical(
+            "Unhandled exception in thread %r",
+            thread_name,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+    else:
+        # threading.ExceptHookArgs technically allows exc_type/exc_value to
+        # be None; a real uncaught-exception callback always provides both,
+        # but log something rather than silently dropping the report if
+        # that ever isn't true.
+        logger.critical(
+            "Unhandled exception in thread %r (no exception info available)", thread_name
+        )
 
 
 def configure_run_logging(
@@ -87,3 +128,5 @@ def configure_run_logging(
     logging.getLogger(_CFLIB_LOGGER_NAME).setLevel(logging.CRITICAL)
     logging.getLogger(script_logger_name).setLevel(file_level)
     logging.getLogger(_PACKAGE_LOGGER_NAME).setLevel(file_level)
+
+    threading.excepthook = _log_thread_exception

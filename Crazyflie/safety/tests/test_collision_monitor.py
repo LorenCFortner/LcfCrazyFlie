@@ -524,13 +524,17 @@ class TestComputeThreshold:
 
 # ---------------------------------------------------------------------------
 # _effective_side_threshold - additive, not max(), velocity-scaled side
-# threshold for non-leading sensors.
+# threshold for non-leading sensors, but ONLY while actively wall-following
+# ("forward_left"). Every other direction (including None) uses the flat
+# _SIDE_CLEARANCE_M floor - see the doorway-width regression this gating
+# fixes, in TestEffectiveSideThresholdDirectionGating below.
 # ---------------------------------------------------------------------------
 
 
 class TestEffectiveSideThreshold:
-    """Pins the exact contract of the additive formula, distinguishing it
-    from the rejected max(_SIDE_CLEARANCE_M, velocity * _REACTION_S) form.
+    """Pins the exact contract of the additive formula (while
+    "forward_left"), distinguishing it from the rejected
+    max(_SIDE_CLEARANCE_M, velocity * _REACTION_S) form.
     """
 
     def test_is_exactly_side_clearance_at_rest(self, mock_scf, event_queue):
@@ -543,7 +547,9 @@ class TestEffectiveSideThreshold:
         # Would equal exactly _SIDE_CLEARANCE_M for velocity < ~0.154 under
         # the rejected max(_SIDE_CLEARANCE_M, velocity * _REACTION_S) form -
         # asserting "strictly greater" is what would fail against that form.
-        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=FlightState(velocity))
+        state = FlightState(velocity)
+        state.set_direction("forward_left")
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
 
         threshold = monitor._effective_side_threshold()
 
@@ -561,12 +567,61 @@ class TestEffectiveSideThreshold:
         resting surroundings. At velocity 0.05 (below the 0.25 floor's
         crossover), the side threshold must be far below 0.25 m.
         """
-        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=FlightState(0.05))
+        state = FlightState(0.05)
+        state.set_direction("forward_left")
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
 
         threshold = monitor._effective_side_threshold()
 
         assert threshold < 0.25
         assert threshold == pytest.approx(_SIDE_CLEARANCE_M + 0.05 * _REACTION_S)
+
+
+class TestEffectiveSideThresholdDirectionGating:
+    """The additive formula only applies to "forward_left" (active
+    wall-following, where the standoff controller deliberately steers
+    toward the wall). Every other direction gets the flat floor - this is
+    the fix for a 30-inch doorway being untraversable during plain
+    "forward" search flight (see module docstring for the numbers).
+    """
+
+    @pytest.mark.parametrize("direction", ["forward", "back", "left", "right", "up", None])
+    def test_uses_flat_floor_for_non_wall_following_directions(
+        self, mock_scf, event_queue, direction
+    ):
+        state = FlightState(0.30)
+        state.set_direction(direction)
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+        assert monitor._effective_side_threshold() == pytest.approx(_SIDE_CLEARANCE_M)
+
+    def test_uses_additive_formula_only_for_forward_left(self, mock_scf, event_queue):
+        state = FlightState(0.30)
+        state.set_direction("forward_left")
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+        threshold = monitor._effective_side_threshold()
+
+        assert threshold == pytest.approx(_SIDE_CLEARANCE_M + 0.30 * _REACTION_S)
+        assert threshold > _SIDE_CLEARANCE_M
+
+    def test_doorway_width_regression(self, mock_scf, event_queue):
+        """The exact scenario from the hardware log: approach_velocity_m_s
+        = 0.30 during a plain "forward" search leg must no longer produce a
+        side threshold that eats most of a 30-inch (0.762 m) doorway's
+        width. The flat floor (0.10 m) leaves ~0.28 m of real margin per
+        side when centered, versus the old additive threshold's ~0.086 m.
+        """
+        state = FlightState(0.30)
+        state.set_direction("forward")
+        monitor = CollisionMonitor(mock_scf, event_queue, flight_state=state)
+
+        threshold = monitor._effective_side_threshold()
+        doorway_width_m = 0.762
+        centered_clearance_m = doorway_width_m / 2.0
+
+        assert threshold == pytest.approx(_SIDE_CLEARANCE_M)
+        assert centered_clearance_m - threshold > 0.25  # comfortable real margin
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +705,99 @@ class TestDynamicAvoidance:
 
         velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
         assert velocity_kwarg == pytest.approx(1.6)
+
+    def test_avoidance_velocity_has_a_floor_at_very_low_speed(self, mock_scf, event_queue, mocker):
+        """Regression: WallFollower's front-proximity brake can drive
+        commanded velocity near zero right as a collision fires, which
+        without a floor would make avoid_velocity (= velocity * 2.0) tiny
+        too -- and the resulting avoid_distance_m / avoid_velocity move
+        duration unbounded. 0.05 m/s * 2.0 = 0.1 m/s, below the
+        _MIN_AVOID_VELOCITY_M_S = 0.3 floor.
+        """
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=0.05
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
+        assert velocity_kwarg == pytest.approx(0.3)
+
+    def test_avoidance_velocity_floor_does_not_affect_higher_speeds(
+        self, mock_scf, event_queue, mocker
+    ):
+        """velocity * 2.0 already exceeds the floor at 0.2 m/s (-> 0.4 m/s),
+        so the floor must not clamp it down.
+        """
+        monitor, mock_ranger = self._make_monitor_with_state(
+            mock_scf, event_queue, mocker, velocity=0.2
+        )
+        mock_mc = mocker.MagicMock()
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        velocity_kwarg = mock_mc.back.call_args[1]["velocity"]
+        assert velocity_kwarg == pytest.approx(0.4)
+
+
+# ---------------------------------------------------------------------------
+# Avoidance move failure - the COLLISION event must still reach the main
+# thread even if the physical avoidance move itself raises (e.g. a race
+# with MotionCommander's own context-exit landing concurrently - see
+# scripts/logs/right_wall_follow.log for the incident this covers).
+# ---------------------------------------------------------------------------
+
+
+class TestAvoidanceMoveFailure:
+    def test_exception_during_avoidance_move_does_not_propagate(self, monitor_with_ranger, mocker):
+        monitor, mock_ranger, _ = monitor_with_ranger
+        mock_ranger.get_readings.return_value = _readings(left=0.05)
+        mock_mc = mocker.MagicMock()
+        mock_mc.right.side_effect = Exception("Can not move on the ground. Take off first!")
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)  # must not raise
+
+    def test_event_still_posted_when_avoidance_move_raises(self, monitor_with_ranger, mocker):
+        monitor, mock_ranger, eq = monitor_with_ranger
+        mock_ranger.get_readings.return_value = _readings(left=0.05)
+        mock_mc = mocker.MagicMock()
+        mock_mc.right.side_effect = Exception("boom")
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)
+
+        assert eq.get_nowait() == "COLLISION"
+
+    def test_failure_is_logged_with_traceback(self, monitor_with_ranger, mocker, caplog):
+        monitor, mock_ranger, _ = monitor_with_ranger
+        mock_ranger.get_readings.return_value = _readings(left=0.05)
+        mock_mc = mocker.MagicMock()
+        mock_mc.right.side_effect = Exception("boom")
+        monitor.attach_motion_commander(mock_mc)
+
+        with caplog.at_level("ERROR", logger="Crazyflie.safety.collision_monitor"):
+            monitor._trigger(mock_ranger)
+
+        assert any(r.exc_info is not None for r in caplog.records)
+
+    def test_exception_during_mc_stop_still_posts_event(self, monitor_with_ranger, mocker):
+        """Broader net: any failure inside the collision response (not just
+        the avoidance move itself) must still result in the event being
+        posted.
+        """
+        monitor, mock_ranger, eq = monitor_with_ranger
+        mock_ranger.get_readings.return_value = _readings(left=0.05)
+        mock_mc = mocker.MagicMock()
+        mock_mc.stop.side_effect = Exception("boom")
+        monitor.attach_motion_commander(mock_mc)
+
+        monitor._trigger(mock_ranger)  # must not raise
+
+        assert eq.get_nowait() == "COLLISION"
 
 
 # ---------------------------------------------------------------------------
@@ -837,9 +985,11 @@ class TestRunOnceDirectionalThreshold:
     def test_side_sensor_does_not_trigger_when_above_side_clearance(
         self, mock_scf, event_queue, mocker
     ):
-        # Moving forward at 0.5 m/s; side threshold is now additive:
-        # 0.10 + 0.5*0.65 = 0.425 m (see CollisionMonitor._effective_side_threshold).
-        # left sensor at 0.50 m > 0.425 m → must NOT trigger.
+        # Moving forward at 0.5 m/s; "forward" is not "forward_left", so the
+        # side threshold is the flat _SIDE_CLEARANCE_M=0.10 floor, not the
+        # additive formula (see CollisionMonitor._effective_side_threshold's
+        # forward_left gating). left sensor at 0.50 m > 0.10 m → must NOT
+        # trigger either way.
         readings = MultiRangerReadings(front=None, back=None, left=0.50, right=None, up=None)
         monitor, _ = self._make_monitor_with_direction(
             mock_scf, event_queue, mocker, velocity=0.5, direction="forward", readings=readings
@@ -862,15 +1012,40 @@ class TestRunOnceDirectionalThreshold:
 
         assert monitor.is_triggered() is True
 
-    def test_narrowing_corridor_side_sensor_now_trips_with_stopping_margin(
+    def test_narrowing_corridor_side_sensor_trips_with_stopping_margin_while_wall_following(
         self, mock_scf, event_queue, mocker
     ):
-        """Regression for the additive side threshold: a value that was safe
-        under the old flat 0.10 m floor (0.15 m) must now trigger while
-        translating at 0.5 m/s, because 0.15 m no longer leaves room to stop
-        before the blades reach a laterally-closing wall (e.g. a narrowing
-        corridor) - the motivating scenario for CollisionMonitor learning a
-        velocity-scaled side threshold at all.
+        """Regression for the additive side threshold: a value that is safe
+        under the flat 0.10 m floor (0.15 m) must still trigger while
+        actively wall-following ("forward_left") at 0.5 m/s, because 0.15 m
+        does not leave room to stop before the blades reach a
+        laterally-closing wall (e.g. a narrowing corridor) - the motivating
+        scenario for CollisionMonitor learning a velocity-scaled side
+        threshold at all (see the module docstring's "forward_left" gating:
+        this margin is now scoped to active wall-following specifically,
+        not every direction).
+        """
+        readings = MultiRangerReadings(front=None, back=None, left=0.15, right=None, up=None)
+        monitor, _ = self._make_monitor_with_direction(
+            mock_scf,
+            event_queue,
+            mocker,
+            velocity=0.5,
+            direction="forward_left",
+            readings=readings,
+        )
+
+        monitor._run_once()
+
+        assert monitor.is_triggered() is True
+
+    def test_same_narrowing_corridor_value_no_longer_trips_during_plain_forward(
+        self, mock_scf, event_queue, mocker
+    ):
+        """The other half of the regression above: the same 0.15 m left
+        reading at the same 0.5 m/s must NOT trigger during plain "forward"
+        flight (only the flat 0.10 m floor applies there now) - this is the
+        fix that makes a 30-inch doorway passable during search/path flight.
         """
         readings = MultiRangerReadings(front=None, back=None, left=0.15, right=None, up=None)
         monitor, _ = self._make_monitor_with_direction(
@@ -879,7 +1054,7 @@ class TestRunOnceDirectionalThreshold:
 
         monitor._run_once()
 
-        assert monitor.is_triggered() is True
+        assert monitor.is_triggered() is False
 
     def test_flight_dir_sensor_uses_dynamic_threshold(self, mock_scf, event_queue, mocker):
         # Moving forward at 0.6 m/s; dynamic threshold = 0.39 (0.6 * 0.65 > 0.25 base)

@@ -42,6 +42,24 @@ compute_follow_command() for the exact formula. This is an approximation,
 not a guarantee -- CollisionMonitor remains the untouched, authoritative
 backstop.
 
+A single instantaneous front reading is not a reliable brake-release signal
+at a corner: the front beam sweeps across the corner's edge as the yaw
+correction hunts toward the true heading, so front can flicker between
+"close" and "wide open" (2+ m) within consecutive 100 ms polls even though
+the drone itself hasn't moved anywhere near that far (observed on hardware
+-- see scripts/logs/right_wall_follow.log, 12:30 run: front swung between
+0.26 m and 2.3 m repeatedly in the ~2.5 s before a COLLISION trigger). If
+the brake fully releases the instant one poll reads clear, the loop
+re-commands full follow_velocity_m_s right before the next flicker back to
+"close" -- exactly what preceded that collision. v_follow may therefore
+drop instantly (braking stays immediate -- the safety-critical direction)
+but may only climb back up by a bounded step per cycle, spread over
+_REACTION_S (reused from CollisionMonitor, not a new constant) -- see
+compute_follow_command()'s previous_v_follow parameter. follow() tracks the
+real v_follow across its loop and feeds it back in each cycle; an isolated
+call (e.g. in a test) is unaffected -- previous_v_follow defaults to None,
+meaning "no slew limit".
+
 A missing front reading (None, or <= 0.0) means "nothing within
 MAX_RANGE_M" per Crazyflie.decks.multi_ranger's own convention -- not a
 fault, and not "the wall is lost". It is substituted with MAX_RANGE_M and
@@ -205,12 +223,18 @@ class FollowCommand:
             yaw_rate_deg_s are all 0.0. A missing front does not affect
             this -- it is treated as a very far reading (MAX_RANGE_M), not
             as the wall being lost.
+        v_follow: The along-wall forward-push term actually used this
+            cycle, after the front-proximity brake and slew limit -- feed
+            this back in as the next call's previous_v_follow to keep the
+            slew limit continuous across follow()'s loop. Always 0.0 when
+            wall_visible is False.
     """
 
     vx: float
     vy: float
     yaw_rate_deg_s: float
     wall_visible: bool
+    v_follow: float = 0.0
 
 
 class WallFollower:
@@ -244,12 +268,13 @@ class WallFollower:
         self,
         front: float | None,
         right: float | None,
+        previous_v_follow: float | None = None,
     ) -> FollowCommand:
         """Compute the velocity command for one control cycle.
 
-        Pure function of the two sensor readings and this follower's
-        config -- see the module docstring for the geometry and error-signal
-        derivation.
+        Pure function of the two sensor readings, previous_v_follow, and
+        this follower's config -- see the module docstring for the geometry
+        and error-signal derivation, and for the forward-push slew limit.
 
         Args:
             front: Front Multi-ranger distance in meters, or None/<=0.0 if
@@ -259,16 +284,27 @@ class WallFollower:
             right: Right Multi-ranger distance in meters, or None/<=0.0 if
                 unreadable -- right is the wall actually being followed, so
                 a missing reading here means the wall is genuinely lost.
+            previous_v_follow: The v_follow this loop actually used last
+                cycle. When given, an *increase* in the front-proximity
+                brake's target v_follow is capped to one slew step this
+                cycle (see the module docstring's front-proximity-brake
+                paragraph) -- a *decrease* (braking) is never delayed.
+                Defaults to None, meaning "no slew limit" -- an isolated
+                call (e.g. in a test) reaches the target in one step, same
+                as before this parameter existed. follow() is the one that
+                tracks and passes the real previous cycle's value.
 
         Returns:
-            FollowCommand with wall_visible=False (and all-zero velocity)
-            when right is missing; otherwise the computed heading +
-            standoff correction, clamped to max_velocity_m_s and
-            max_yaw_rate_deg_s. A missing front is substituted with
-            MAX_RANGE_M before this computation, so it still yields
-            wall_visible=True and a live command -- typically a hard yaw
-            back toward the wall. The forward-push term is additionally
-            throttled by front proximity -- see front_brake_zone_m.
+            FollowCommand with wall_visible=False (and all-zero velocity,
+            including v_follow) when right is missing; otherwise the
+            computed heading + standoff correction, clamped to
+            max_velocity_m_s and max_yaw_rate_deg_s. A missing front is
+            substituted with MAX_RANGE_M before this computation, so it
+            still yields wall_visible=True and a live command -- typically
+            a hard yaw back toward the wall. The forward-push term is
+            additionally throttled by front proximity and slew-limited on
+            the way back up -- see front_brake_zone_m and previous_v_follow
+            above.
         """
         cfg = self._config
         if right is None or right <= 0.0:
@@ -305,7 +341,19 @@ class WallFollower:
         front_scale = (front_effective - front_threshold) / cfg.front_brake_zone_m
         front_scale = max(0.0, min(1.0, front_scale))
 
-        v_follow = cfg.follow_velocity_m_s * front_scale
+        v_follow_target = cfg.follow_velocity_m_s * front_scale
+        # Braking (a lower target) is never delayed -- only a climb back up
+        # is slew-limited, over _REACTION_S (reused from CollisionMonitor,
+        # not a new constant), so a single transient "clear" reading can't
+        # snap the forward push straight back to full speed before the
+        # sensor has a chance to confirm it. See the module docstring's
+        # front-proximity-brake paragraph for the log evidence this fixes.
+        if previous_v_follow is None or v_follow_target <= previous_v_follow:
+            v_follow = v_follow_target
+        else:
+            max_step = (cfg.follow_velocity_m_s / _REACTION_S) * _POLL_INTERVAL_S
+            v_follow = min(v_follow_target, previous_v_follow + max_step)
+
         v_correct = cfg.standoff_gain * standoff_error
 
         vx = (v_follow + v_correct) / _SQRT2
@@ -317,7 +365,9 @@ class WallFollower:
             vx *= scale
             vy *= scale
 
-        return FollowCommand(vx=vx, vy=vy, yaw_rate_deg_s=yaw_rate, wall_visible=True)
+        return FollowCommand(
+            vx=vx, vy=vy, yaw_rate_deg_s=yaw_rate, wall_visible=True, v_follow=v_follow
+        )
 
     def is_aligned(self, front: float | None, right: float | None) -> bool:
         """Return True if front and right read within align_tolerance_m.
@@ -485,6 +535,7 @@ class WallFollower:
         cfg = self._config
         start_time = time.monotonic()
         last_wall_seen_time = start_time
+        previous_v_follow = 0.0  # Real velocity starts at 0.0 when follow() begins.
 
         while True:
             if should_abort is not None and should_abort():
@@ -501,7 +552,10 @@ class WallFollower:
                 )
                 break
 
-            command = self.compute_follow_command(readings.front, readings.right)
+            command = self.compute_follow_command(
+                readings.front, readings.right, previous_v_follow
+            )
+            previous_v_follow = command.v_follow
             now = time.monotonic()
             if command.wall_visible:
                 last_wall_seen_time = now

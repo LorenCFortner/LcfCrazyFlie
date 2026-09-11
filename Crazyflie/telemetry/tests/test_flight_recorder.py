@@ -140,6 +140,38 @@ class TestRecordStabilizer:
         assert row["front"] == ""
 
 
+class TestRecordLink:
+    def test_writes_link_row(self, tmp_path):
+        csv_path = tmp_path / "run_telemetry.csv"
+        recorder = FlightRecorder()
+        recorder.start(csv_path)
+
+        recorder.record_link(link_quality=72.5, uplink_rssi=180.0)
+        recorder.stop()
+
+        rows = _read_rows(csv_path)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["source"] == "link"
+        assert row["context"] == "poll"
+        assert row["link_quality"] == "72.5"
+        assert row["uplink_rssi"] == "180.0"
+        assert row["front"] == ""
+        assert row["battery_v"] == ""
+
+    def test_none_values_write_as_blank(self, tmp_path):
+        csv_path = tmp_path / "run_telemetry.csv"
+        recorder = FlightRecorder()
+        recorder.start(csv_path)
+
+        recorder.record_link(link_quality=None, uplink_rssi=None)
+        recorder.stop()
+
+        rows = _read_rows(csv_path)
+        assert rows[0]["link_quality"] == ""
+        assert rows[0]["uplink_rssi"] == ""
+
+
 class TestStop:
     def test_stop_is_safe_without_start(self):
         recorder = FlightRecorder()

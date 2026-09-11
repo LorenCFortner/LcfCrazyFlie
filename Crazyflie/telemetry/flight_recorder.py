@@ -1,12 +1,12 @@
 """Continuous flight telemetry recorder for Crazyflie 2.0.
 
-Writes every sensor reading CollisionMonitor and StabilizerMonitor already
-take to one CSV - not just the WARNING-level events that make it into the
-text run log - so a flight can be reconstructed from data afterward instead
-of guessed at from sparse event logs.
+Writes every sensor reading CollisionMonitor, StabilizerMonitor, and
+LinkMonitor already take to one CSV - not just the WARNING-level events that
+make it into the text run log - so a flight can be reconstructed from data
+afterward instead of guessed at from sparse event logs.
 
-Fed by both monitors on every reading they already take; does not open its
-own connection to any deck. A second, independent connection to the
+Fed by all three monitors on every reading they already take; does not open
+its own connection to any deck. A second, independent connection to the
 Multi-ranger deck alongside CollisionMonitor's is not safe (duplicate log
 configs, limited radio log bandwidth) - see Crazyflie.decks.multi_ranger.
 
@@ -15,6 +15,7 @@ Example:
     >>> recorder.start(Path("scripts/logs/my_flight_telemetry.csv"))
     >>> collision_monitor = CollisionMonitor(scf, event_queue, recorder=recorder)
     >>> stabilizer_monitor = StabilizerMonitor(scf, event_queue, recorder=recorder)
+    >>> link_monitor = LinkMonitor(scf, event_queue, recorder=recorder)
     >>> # ... flight happens ...
     >>> recorder.stop()
 """
@@ -46,6 +47,8 @@ CSV_HEADER: list[str] = [
     "pitch_deg",
     "height_mm",
     "battery_v",
+    "link_quality",
+    "uplink_rssi",
 ]
 
 
@@ -130,6 +133,22 @@ class FlightRecorder:
             battery_v=state.battery_v,
         )
 
+    def record_link(self, link_quality: float | None, uplink_rssi: float | None) -> None:
+        """Append one radio-link-statistics row.
+
+        Args:
+            link_quality: Current link quality percentage (0-100), or None
+                if no reading has arrived yet.
+            uplink_rssi: Current raw uplink RSSI, or None if no reading has
+                arrived yet.
+        """
+        self._write_row(
+            source="link",
+            context="poll",
+            link_quality=link_quality,
+            uplink_rssi=uplink_rssi,
+        )
+
     def stop(self) -> None:
         """Close the CSV file. Safe to call even if start() was never called."""
         with self._lock:
@@ -153,6 +172,8 @@ class FlightRecorder:
         pitch_deg: float | None = None,
         height_mm: int | None = None,
         battery_v: float | None = None,
+        link_quality: float | None = None,
+        uplink_rssi: float | None = None,
     ) -> None:
         row: list[object] = [
             time.time(),
@@ -169,6 +190,8 @@ class FlightRecorder:
             pitch_deg if pitch_deg is not None else "",
             height_mm if height_mm is not None else "",
             battery_v if battery_v is not None else "",
+            link_quality if link_quality is not None else "",
+            uplink_rssi if uplink_rssi is not None else "",
         ]
         with self._lock:
             if self._writer is None or self._file is None:

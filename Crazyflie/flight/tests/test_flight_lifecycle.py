@@ -65,6 +65,23 @@ def test_handle_safety_events_calls_land_on_low_battery_on_batlow(mocker, mc, st
     mock_land.assert_called_once_with(mc)
 
 
+def test_handle_safety_events_calls_land_on_low_battery_on_lowsignal(
+    mocker, mc, stabilizer_monitor
+):
+    """LOWSIGNAL reuses land_on_low_battery -- a degrading-but-not-dead link
+    is philosophically identical to low battery (drone still stable, land
+    gently rather than treat it like a CRASH).
+    """
+    mock_land = mocker.patch("Crazyflie.flight.flight_lifecycle.land_on_low_battery")
+    eq: queue.Queue[str] = queue.Queue()
+    eq.put("LOWSIGNAL")
+
+    result = handle_safety_events(eq, mc, stabilizer_monitor)
+
+    assert result is True
+    mock_land.assert_called_once_with(mc)
+
+
 def test_handle_safety_events_calls_mc_land_on_collision_when_no_collision_fn(
     mc, stabilizer_monitor
 ):
@@ -372,6 +389,12 @@ def _mock_flight_hardware(mocker: Any, *, clearance_ok: bool = True) -> dict[str
         "Crazyflie.flight.flight_lifecycle.CollisionMonitor", return_value=mock_collision
     )
 
+    mock_link = mocker.MagicMock()
+    mock_link.is_triggered.return_value = False
+    link_cls = mocker.patch(
+        "Crazyflie.flight.flight_lifecycle.LinkMonitor", return_value=mock_link
+    )
+
     mocker.patch("Crazyflie.flight.flight_lifecycle.verify_takeoff", return_value=True)
     mocker.patch("Crazyflie.flight.flight_lifecycle.time.sleep")
 
@@ -380,6 +403,8 @@ def _mock_flight_hardware(mocker: Any, *, clearance_ok: bool = True) -> dict[str
         "mock_collision": mock_collision,
         "mock_stabilizer": mock_stabilizer,
         "stabilizer_cls": stabilizer_cls,
+        "link_cls": link_cls,
+        "mock_link": mock_link,
         "mock_mc": mock_mc_instance,
         "mock_scf": mock_scf_instance,
     }
@@ -472,6 +497,76 @@ class TestMonitorWiring:
         mocks["mock_collision"].detach_motion_commander.assert_called_once()
         mocks["mock_collision"].stop.assert_called_once()
         mocks["mock_collision"].join.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# LinkMonitor wiring
+# ---------------------------------------------------------------------------
+
+
+class TestLinkMonitorWiring:
+    def test_constructed_with_scf_and_shared_event_queue(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+        body = mocker.MagicMock()
+
+        run_flight_lifecycle("radio://0/80/2M", body)
+
+        args, _ = mocks["link_cls"].call_args
+        (ctx,), _ = body.call_args
+        assert args[0] is mocks["mock_scf"]
+        assert args[1] is ctx.event_queue
+
+    def test_started_before_collision_monitor(self, mocker):
+        """LinkMonitor starts alongside stabilizer_monitor, before
+        MotionCommander/takeoff (decision 5) -- unlike CollisionMonitor,
+        which deliberately waits for airborne. Confirmed by call order:
+        link.start() must precede collision.start().
+        """
+        mocks = _mock_flight_hardware(mocker)
+        call_order: list[str] = []
+        mocks["mock_link"].start.side_effect = lambda: call_order.append("link.start")
+        mocks["mock_collision"].start.side_effect = lambda: call_order.append("collision.start")
+
+        run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock())
+
+        assert call_order == ["link.start", "collision.start"]
+
+    def test_should_abort_reflects_link_monitor_triggered(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+        mocks["mock_link"].is_triggered.return_value = True
+        body = mocker.MagicMock()
+
+        run_flight_lifecycle("radio://0/80/2M", body)
+
+        (ctx,), _ = body.call_args
+        assert ctx.should_abort() is True
+
+    def test_stopped_and_joined_in_teardown(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+
+        run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock())
+
+        mocks["mock_link"].stop.assert_called_once()
+        mocks["mock_link"].join.assert_called_once()
+
+    def test_stopped_and_joined_even_when_body_raises(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+        body = mocker.MagicMock(side_effect=RuntimeError("boom"))
+
+        run_flight_lifecycle("radio://0/80/2M", body)  # must not raise
+
+        mocks["mock_link"].stop.assert_called_once()
+        mocks["mock_link"].join.assert_called_once()
+
+    def test_not_added_to_flight_context(self, mocker):
+        """Decision 6: no flight body needs direct access to link quality."""
+        _mock_flight_hardware(mocker)
+        body = mocker.MagicMock()
+
+        run_flight_lifecycle("radio://0/80/2M", body)
+
+        (ctx,), _ = body.call_args
+        assert not hasattr(ctx, "link_monitor")
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +742,14 @@ class TestTelemetryWiring:
         result = self._run(mocker, telemetry_file=telemetry_file)
 
         _, kwargs = result["collision_cls"].call_args
+        assert kwargs.get("recorder") is result["mock_recorder"]
+
+    def test_passes_recorder_to_link_monitor(self, mocker, tmp_path):
+        telemetry_file = tmp_path / "telemetry.csv"
+
+        result = self._run(mocker, telemetry_file=telemetry_file)
+
+        _, kwargs = result["link_cls"].call_args
         assert kwargs.get("recorder") is result["mock_recorder"]
 
     def test_stops_recorder_after_normal_completion(self, mocker, tmp_path):

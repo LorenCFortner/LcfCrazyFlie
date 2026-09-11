@@ -34,6 +34,7 @@ from Crazyflie.safety.emergency_land import land_immediately, land_on_low_batter
 from Crazyflie.safety.takeoff_verifier import verify_takeoff
 from Crazyflie.state.flight_state import FlightState
 from Crazyflie.telemetry.flight_recorder import FlightRecorder
+from Crazyflie.telemetry.link_monitor import LinkMonitor
 from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
 logger = logging.getLogger(__name__)
@@ -120,8 +121,8 @@ class FlightContext:
         mc: Active MotionCommander instance.
         flight_state: Shared FlightState written by whichever component is
             actively commanding motion (SafeFlightController, WallFollower).
-        event_queue: Queue receiving CRASH / BATLOW / COLLISION messages from
-            the running monitors.
+        event_queue: Queue receiving CRASH / BATLOW / LOWSIGNAL / COLLISION
+            messages from the running monitors.
         stabilizer_monitor: Running StabilizerMonitor (stopped by
             handle_safety_events on an event).
         collision_monitor: Running, attached CollisionMonitor.
@@ -155,7 +156,7 @@ def handle_safety_events(
     adaptive_corrector: AdaptivePathCorrector | None = None,
     block_timeout_s: float = 0.0,
 ) -> bool:
-    """Drain the event queue and react to any CRASH/BATLOW/COLLISION event.
+    """Drain the event queue and react to any CRASH/BATLOW/LOWSIGNAL/COLLISION event.
 
     Shared by every flight_body_fn - each one calls this itself right after
     its own `if should_abort():` check, rather than run_flight_lifecycle()
@@ -175,7 +176,8 @@ def handle_safety_events(
     wall-following uses (a wall follow has no recorded path to retrace).
 
     Args:
-        event_queue: Queue receiving CRASH / BATLOW / COLLISION messages.
+        event_queue: Queue receiving CRASH / BATLOW / LOWSIGNAL / COLLISION
+            messages.
         mc: Active MotionCommander instance.
         stabilizer_monitor: Running StabilizerMonitor (stopped on event).
         controller: SafeFlightController whose flight_log describes progress
@@ -222,6 +224,13 @@ def handle_safety_events(
         land_immediately(mc)
     elif event == "BATLOW":
         logger.warning("Low battery - landing now.")
+        land_on_low_battery(mc)
+    elif event == "LOWSIGNAL":
+        # A degrading-but-not-dead link is philosophically identical to low
+        # battery: the drone is still stable, land gently rather than treat
+        # it like a CRASH. Reuses land_on_low_battery rather than adding a
+        # near-identical function.
+        logger.warning("Low signal strength - landing now.")
         land_on_low_battery(mc)
     elif event == "COLLISION":
         if on_collision_fn is not None:
@@ -273,9 +282,9 @@ def run_flight_lifecycle(
             FlightLifecycleHooks() (LED pre/post-flight defaults, no
             AdaptivePathCorrector) when None.
         telemetry_file: Optional path to write continuous sensor telemetry
-            (every Multi-ranger reading and stabilizer sample, not just
-            WARNING-level events) to as CSV. When None, no telemetry is
-            recorded.
+            (every Multi-ranger reading, stabilizer sample, and link-quality
+            sample, not just WARNING-level events) to as CSV. When None, no
+            telemetry is recorded.
     """
     _hooks = hooks if hooks is not None else FlightLifecycleHooks()
     _pre = _hooks.pre_flight_fn if _hooks.pre_flight_fn is not None else _default_pre_flight
@@ -319,6 +328,9 @@ def run_flight_lifecycle(
         stabilizer_monitor = StabilizerMonitor(scf, event_queue, recorder=recorder)
         stabilizer_monitor.start()
 
+        link_monitor = LinkMonitor(scf, event_queue, recorder=recorder)
+        link_monitor.start()
+
         adaptive_corrector: AdaptivePathCorrector | None = None
         if _hooks.make_adaptive_corrector is not None:
             adaptive_corrector = _hooks.make_adaptive_corrector(scf, flight_state)
@@ -339,7 +351,11 @@ def run_flight_lifecycle(
         flight_start = time.time()
 
         def should_abort() -> bool:
-            return collision_monitor.is_triggered() or stabilizer_monitor.is_triggered()
+            return (
+                collision_monitor.is_triggered()
+                or stabilizer_monitor.is_triggered()
+                or link_monitor.is_triggered()
+            )
 
         try:
             with MotionCommander(scf) as mc:
@@ -393,6 +409,8 @@ def run_flight_lifecycle(
             flight_time = time.time() - flight_start
             stabilizer_monitor.stop()
             stabilizer_monitor.join()
+            link_monitor.stop()
+            link_monitor.join()
             if recorder is not None:
                 recorder.stop()
             try:

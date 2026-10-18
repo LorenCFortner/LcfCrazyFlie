@@ -172,7 +172,7 @@ def main() -> None:
                 logger.info("Hover complete - landing.")
 
         except Exception as exc:
-            logger.error(f"Flight error: {exc}")
+            logger.exception(f"Flight error: {exc}")
         finally:
             collision_monitor.detach_motion_commander()
             collision_monitor.stop()

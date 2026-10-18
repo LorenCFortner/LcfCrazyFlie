@@ -5,8 +5,8 @@ same path with all directions automatically inverted.
 """
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 from cflib.positioning.motion_commander import MotionCommander
 
@@ -80,7 +80,7 @@ class PathRunner:
     def run(
         self,
         mc: MotionCommander,
-        should_abort: Optional[Callable[[], bool]] = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path in order.
 
@@ -97,7 +97,7 @@ class PathRunner:
     def run_out_and_back(
         self,
         mc: MotionCommander,
-        should_abort: Optional[Callable[[], bool]] = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path outbound, pivot 180°, then retrace back home.
 
@@ -132,7 +132,7 @@ class PathRunner:
     def run_reversed(
         self,
         mc: MotionCommander,
-        should_abort: Optional[Callable[[], bool]] = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path in reverse to return home.
 

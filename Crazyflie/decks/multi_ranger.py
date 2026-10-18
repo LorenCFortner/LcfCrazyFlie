@@ -17,7 +17,6 @@ Example:
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.utils.multiranger import Multiranger
@@ -37,11 +36,11 @@ class MultiRangerReadings:
         up: Distance above in meters, or None if nothing within 8 m.
     """
 
-    front: Optional[float]
-    back: Optional[float]
-    left: Optional[float]
-    right: Optional[float]
-    up: Optional[float]
+    front: float | None
+    back: float | None
+    left: float | None
+    right: float | None
+    up: float | None
 
 
 class MultiRangerDeck:
@@ -64,9 +63,9 @@ class MultiRangerDeck:
             scf: Connected SyncCrazyflie instance.
         """
         self._scf = scf
-        self._multiranger: Optional[Multiranger] = None
+        self._multiranger: Multiranger | None = None
 
-    def __enter__(self) -> "MultiRangerDeck":
+    def __enter__(self) -> MultiRangerDeck:
         self._multiranger = Multiranger(self._scf)
         self._multiranger.__enter__()
         return self
@@ -77,27 +76,27 @@ class MultiRangerDeck:
             self._multiranger = None
 
     @property
-    def front(self) -> Optional[float]:
+    def front(self) -> float | None:
         """Distance ahead in meters, or None if nothing within 8 m."""
         return self._multiranger.front if self._multiranger else None
 
     @property
-    def back(self) -> Optional[float]:
+    def back(self) -> float | None:
         """Distance behind in meters, or None if nothing within 8 m."""
         return self._multiranger.back if self._multiranger else None
 
     @property
-    def left(self) -> Optional[float]:
+    def left(self) -> float | None:
         """Distance to the left in meters, or None if nothing within 8 m."""
         return self._multiranger.left if self._multiranger else None
 
     @property
-    def right(self) -> Optional[float]:
+    def right(self) -> float | None:
         """Distance to the right in meters, or None if nothing within 8 m."""
         return self._multiranger.right if self._multiranger else None
 
     @property
-    def up(self) -> Optional[float]:
+    def up(self) -> float | None:
         """Distance above in meters, or None if nothing within 8 m."""
         return self._multiranger.up if self._multiranger else None
 

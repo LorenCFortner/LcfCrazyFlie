@@ -1,10 +1,32 @@
+[project]
+name = "lcf-crazyflie"
+version = "0.1.0"
+description = "Crazyflie 2.0 flight control, safety monitors and flight scripts built on cflib."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "cflib>=0.1.31",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.1.0",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.15.8",
+]
+
+[tool.uv]
+package = false
+
 [tool.ruff]
 line-length = 99
 target-version = "py314"
 exclude = ["Spikes", ".venv"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "B", "C4"]
+select = ["E", "F", "I", "N", "W", "B", "C4", "UP"]
 ignore = ["E501", "N999"]
 
 [tool.mypy]
@@ -21,6 +43,7 @@ module = [
     "Crazyflie.conftest",
     "Crazyflie.*.tests.*",
     "Crazyflie.*.*.tests.*",
+    "hooks.tests.*",
 ]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false

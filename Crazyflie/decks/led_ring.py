@@ -48,7 +48,8 @@ class LedRingDeck:
 
         Args:
             scf: Connected SyncCrazyflie instance.
-            effect_id: Effect number (0=off, 1=solid, 2=fade, 6=doublespinner, 7=solidcolor).
+            effect_id: Firmware effect number (0=off, 1=white spinner, 2=color spinner,
+                6=double spinner, 7=solid color, 14=fade color).
         """
         scf.cf.param.set_value("ring.effect", str(effect_id))
 

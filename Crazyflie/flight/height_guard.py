@@ -5,8 +5,6 @@ so the drone never flies above `max_height_m` or below `min_height_m`.
 Horizontal and rotational commands are passed through unchanged.
 """
 
-from typing import Optional
-
 from Crazyflie.flight.path_runner import FlightStep
 
 _HEIGHT_COMMANDS = {"up", "down"}
@@ -47,7 +45,7 @@ class HeightGuard:
         """Current tracked drone height in meters."""
         return self._current
 
-    def clamp(self, step: FlightStep) -> Optional[FlightStep]:
+    def clamp(self, step: FlightStep) -> FlightStep | None:
         """Clamp a FlightStep to stay within height bounds.
 
         Non-height commands are returned as-is (identity). For `up`/`down`
@@ -75,7 +73,7 @@ class HeightGuard:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _clamp_up(self, step: FlightStep) -> Optional[FlightStep]:
+    def _clamp_up(self, step: FlightStep) -> FlightStep | None:
         remaining = self._max - self._current
         if remaining <= 0.0:
             return None
@@ -93,7 +91,7 @@ class HeightGuard:
             settle_s=step.settle_s,
         )
 
-    def _clamp_down(self, step: FlightStep) -> Optional[FlightStep]:
+    def _clamp_down(self, step: FlightStep) -> FlightStep | None:
         remaining = self._current - self._min
         if remaining <= 0.0:
             return None

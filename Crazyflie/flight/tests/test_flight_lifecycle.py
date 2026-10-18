@@ -678,6 +678,19 @@ class TestExceptionTeardown:
         mocks["mock_stabilizer"].stop.assert_called_once()
         mocks["mock_stabilizer"].join.assert_called_once()
 
+    def test_body_exception_logged_as_flight_error_with_traceback(self, mocker, caplog):
+        _mock_flight_hardware(mocker)
+        body = mocker.MagicMock(side_effect=RuntimeError("boom"))
+
+        with caplog.at_level("ERROR", logger="Crazyflie.flight.flight_lifecycle"):
+            run_flight_lifecycle("radio://0/80/2M", body)
+
+        errors = [r for r in caplog.records if r.message.startswith("Flight error")]
+        assert len(errors) == 1
+        assert "boom" in errors[0].getMessage()
+        assert errors[0].exc_info is not None
+        assert errors[0].exc_info[0] is RuntimeError
+
     def test_post_flight_fn_exception_does_not_propagate(self, mocker):
         _mock_flight_hardware(mocker)
         post_fn = mocker.MagicMock(side_effect=RuntimeError("led error"))

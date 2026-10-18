@@ -66,7 +66,7 @@ class FlowDeck:
         self._delta_x: float | None = None
         self._delta_y: float | None = None
 
-    def __enter__(self) -> "FlowDeck":
+    def __enter__(self) -> FlowDeck:
         self._log_config = LogConfig(name="FlowDeck", period_in_ms=_LOG_PERIOD_MS)
         self._log_config.add_variable("range.zrange", "uint16_t")
         self._log_config.add_variable("motion.deltaX", "int16_t")

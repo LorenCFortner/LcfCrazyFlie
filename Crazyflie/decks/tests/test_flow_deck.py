@@ -1,53 +1,50 @@
 """Tests for FlowDeck and FlowDeckReadings.
 
-Written test-first (TDD). All cflib I/O is mocked - no real drone required.
+Written test-first (TDD). The drone connection is mocked - no real drone required.
 """
+
+from typing import Any
 
 import pytest
 
 from Crazyflie.decks.flow_deck import FlowDeck, FlowDeckReadings
+from Crazyflie.hardware.drone_connection import LogVariable
 
 
 @pytest.fixture
-def mock_scf(mocker):
+def subscription(mocker):
     return mocker.MagicMock()
 
 
 @pytest.fixture
-def mock_log_config(mocker):
-    lc = mocker.MagicMock()
-    lc.data_received_cb = mocker.MagicMock()
-    lc.data_received_cb.add_callback = mocker.MagicMock()
-    return lc
+def drone(mock_drone, subscription):
+    mock_drone.subscribe_log.return_value = subscription
+    return mock_drone
 
 
 @pytest.fixture
-def entered_deck(mock_scf, mock_log_config, mocker):
-    """Returns an entered FlowDeck and the mock LogConfig."""
-    mocker.patch("Crazyflie.decks.flow_deck.LogConfig", return_value=mock_log_config)
-    deck = FlowDeck(mock_scf)
+def entered_deck(drone):
+    """Returns an entered FlowDeck."""
+    deck = FlowDeck(drone)
     deck.__enter__()
-    return deck, mock_log_config
+    return deck
 
 
 @pytest.fixture
-def deck_with_data(entered_deck):
+def deck_with_data(drone, entered_deck):
     """Returns an entered FlowDeck with a helper to fire the data callback."""
-    deck, mock_lc = entered_deck
-    cb = mock_lc.data_received_cb.add_callback.call_args[0][0]
+    cb = drone.subscribe_log.call_args[0][1]
 
     def fire(height_mm: float = 500, delta_x: int = 0, delta_y: int = 0) -> None:
         cb(
-            1000,
             {
                 "range.zrange": height_mm,
                 "motion.deltaX": delta_x,
                 "motion.deltaY": delta_y,
-            },
-            mock_lc,
+            }
         )
 
-    return deck, fire
+    return entered_deck, fire
 
 
 class TestFlowDeckReadings:
@@ -67,83 +64,51 @@ class TestFlowDeckReadings:
 
 
 class TestContextManager:
-    def test_enter_creates_log_config_with_100ms_period(self, mock_scf, mock_log_config, mocker):
-        patched = mocker.patch("Crazyflie.decks.flow_deck.LogConfig", return_value=mock_log_config)
+    def test_enter_subscribes_with_100ms_period(self, drone):
+        FlowDeck(drone).__enter__()
 
-        FlowDeck(mock_scf).__enter__()
+        config = drone.subscribe_log.call_args[0][0]
+        assert config.name == "FlowDeck"
+        assert config.period_ms == 100
 
-        patched.assert_called_once_with(name="FlowDeck", period_in_ms=100)
+    def test_enter_streams_exactly_the_three_flow_variables(self, drone):
+        FlowDeck(drone).__enter__()
 
-    def test_enter_adds_zrange_variable(self, entered_deck):
-        _, mock_lc = entered_deck
+        config = drone.subscribe_log.call_args[0][0]
+        assert config.variables == (
+            LogVariable("range.zrange", "uint16_t"),
+            LogVariable("motion.deltaX", "int16_t"),
+            LogVariable("motion.deltaY", "int16_t"),
+        )
 
-        mock_lc.add_variable.assert_any_call("range.zrange", "uint16_t")
+    def test_enter_subscribes_once(self, drone, entered_deck):
+        drone.subscribe_log.assert_called_once()
 
-    def test_enter_adds_delta_x_variable(self, entered_deck):
-        _, mock_lc = entered_deck
+    def test_exit_stops_subscription(self, entered_deck, subscription):
+        entered_deck.__exit__(None, None, None)
 
-        mock_lc.add_variable.assert_any_call("motion.deltaX", "int16_t")
+        subscription.stop.assert_called_once()
 
-    def test_enter_adds_delta_y_variable(self, entered_deck):
-        _, mock_lc = entered_deck
+    def test_exit_clears_subscription_reference(self, entered_deck):
+        entered_deck.__exit__(None, None, None)
 
-        mock_lc.add_variable.assert_any_call("motion.deltaY", "int16_t")
+        assert entered_deck._subscription is None
 
-    def test_enter_adds_exactly_three_variables(self, entered_deck):
-        _, mock_lc = entered_deck
-
-        assert mock_lc.add_variable.call_count == 3
-
-    def test_enter_registers_data_callback(self, entered_deck):
-        _, mock_lc = entered_deck
-
-        mock_lc.data_received_cb.add_callback.assert_called_once()
-
-    def test_enter_starts_log_config(self, entered_deck):
-        _, mock_lc = entered_deck
-
-        mock_lc.start.assert_called_once()
-
-    def test_enter_adds_config_to_scf(self, mock_scf, entered_deck):
-        _, mock_lc = entered_deck
-
-        mock_scf.cf.log.add_config.assert_called_once_with(mock_lc)
-
-    def test_exit_stops_log_config(self, entered_deck):
-        deck, mock_lc = entered_deck
-
-        deck.__exit__(None, None, None)
-
-        mock_lc.stop.assert_called_once()
-
-    def test_exit_clears_log_config_reference(self, entered_deck):
-        deck, _ = entered_deck
-
-        deck.__exit__(None, None, None)
-
-        assert deck._log_config is None
-
-    def test_exit_safe_when_not_entered(self, mock_scf):
-        deck = FlowDeck(mock_scf)
+    def test_exit_safe_when_not_entered(self, drone):
+        deck = FlowDeck(drone)
 
         deck.__exit__(None, None, None)  # should not raise
 
 
 class TestProperties:
     def test_height_mm_is_none_before_data(self, entered_deck):
-        deck, _ = entered_deck
-
-        assert deck.height_mm is None
+        assert entered_deck.height_mm is None
 
     def test_delta_x_is_none_before_data(self, entered_deck):
-        deck, _ = entered_deck
-
-        assert deck.delta_x is None
+        assert entered_deck.delta_x is None
 
     def test_delta_y_is_none_before_data(self, entered_deck):
-        deck, _ = entered_deck
-
-        assert deck.delta_y is None
+        assert entered_deck.delta_y is None
 
     def test_height_mm_updated_after_callback(self, deck_with_data):
         deck, fire = deck_with_data
@@ -175,9 +140,7 @@ class TestProperties:
 
 class TestGetReadings:
     def test_returns_flow_deck_readings_instance(self, entered_deck):
-        deck, _ = entered_deck
-
-        assert isinstance(deck.get_readings(), FlowDeckReadings)
+        assert isinstance(entered_deck.get_readings(), FlowDeckReadings)
 
     def test_readings_reflect_current_state(self, deck_with_data):
         deck, fire = deck_with_data
@@ -190,9 +153,7 @@ class TestGetReadings:
         assert readings.delta_y == -1
 
     def test_readings_none_before_data(self, entered_deck):
-        deck, _ = entered_deck
-
-        readings = deck.get_readings()
+        readings = entered_deck.get_readings()
 
         assert readings.height_mm is None
         assert readings.delta_x is None
@@ -200,112 +161,63 @@ class TestGetReadings:
 
 
 class TestGetHeightMm:
-    def test_returns_height_when_data_arrives(self, mocker):
-        mock_scf = mocker.MagicMock()
-        mock_lc = mocker.MagicMock()
-        mock_lc.data_received_cb = mocker.MagicMock()
+    @staticmethod
+    def _drone_delivering(drone: Any, data: dict[str, Any]) -> None:
+        """Make subscribe_log deliver data to the callback as soon as it is subscribed."""
 
-        captured: dict = {}
+        def subscribe(config, callback):
+            callback(data)
+            return drone.subscribe_log.return_value
 
-        def capture_cb(cb):
-            captured["fn"] = cb
+        drone.subscribe_log.side_effect = subscribe
 
-        mock_lc.data_received_cb.add_callback.side_effect = capture_cb
+    def test_returns_height_when_data_arrives(self, mock_drone):
+        self._drone_delivering(mock_drone, {"range.zrange": 820})
 
-        def trigger_on_start():
-            captured["fn"](1000, {"range.zrange": 820.0}, mock_lc)
-
-        mock_lc.start.side_effect = trigger_on_start
-
-        mocker.patch("Crazyflie.decks.flow_deck.LogConfig", return_value=mock_lc)
-
-        result = FlowDeck.get_height_mm(mock_scf)
+        result = FlowDeck.get_height_mm(mock_drone)
 
         assert result == pytest.approx(820.0)
 
-    def test_returns_none_on_timeout(self, mocker):
-        mock_scf = mocker.MagicMock()
-        mock_lc = mocker.MagicMock()
-        mock_lc.data_received_cb = mocker.MagicMock()
-        mock_lc.data_received_cb.add_callback = mocker.MagicMock()
+    def test_returns_none_on_timeout(self, mock_drone, mocker):
+        mocker.patch("Crazyflie.decks.flow_deck.Event").return_value.wait.return_value = False
 
-        mock_event = mocker.MagicMock()
-        mock_event.wait.return_value = False
-
-        mocker.patch("Crazyflie.decks.flow_deck.LogConfig", return_value=mock_lc)
-        mocker.patch("Crazyflie.decks.flow_deck.Event", return_value=mock_event)
-
-        result = FlowDeck.get_height_mm(mock_scf, timeout_s=2.0)
+        result = FlowDeck.get_height_mm(mock_drone, timeout_s=2.0)
 
         assert result is None
 
-    def test_stops_log_config_after_success(self, mocker):
-        mock_scf = mocker.MagicMock()
-        mock_lc = mocker.MagicMock()
-        mock_lc.data_received_cb = mocker.MagicMock()
+    def test_ignores_samples_without_zrange(self, mock_drone, mocker):
+        self._drone_delivering(mock_drone, {"motion.deltaX": 3})
+        mocker.patch("Crazyflie.decks.flow_deck.Event").return_value.wait.return_value = False
 
-        captured: dict = {}
+        assert FlowDeck.get_height_mm(mock_drone) is None
 
-        def capture_cb(cb):
-            captured["fn"] = cb
+    def test_stops_subscription_after_success(self, mock_drone):
+        self._drone_delivering(mock_drone, {"range.zrange": 500})
 
-        mock_lc.data_received_cb.add_callback.side_effect = capture_cb
+        FlowDeck.get_height_mm(mock_drone)
 
-        def trigger_on_start():
-            captured["fn"](1000, {"range.zrange": 500.0}, mock_lc)
+        mock_drone.subscribe_log.return_value.stop.assert_called_once()
 
-        mock_lc.start.side_effect = trigger_on_start
+    def test_stops_subscription_on_timeout(self, mock_drone, mocker):
+        mocker.patch("Crazyflie.decks.flow_deck.Event").return_value.wait.return_value = False
 
-        mocker.patch("Crazyflie.decks.flow_deck.LogConfig", return_value=mock_lc)
+        FlowDeck.get_height_mm(mock_drone, timeout_s=2.0)
 
-        FlowDeck.get_height_mm(mock_scf)
+        mock_drone.subscribe_log.return_value.stop.assert_called_once()
 
-        mock_lc.stop.assert_called_once()
+    def test_uses_range_zrange_variable(self, mock_drone, mocker):
+        mocker.patch("Crazyflie.decks.flow_deck.Event").return_value.wait.return_value = False
 
-    def test_stops_log_config_on_timeout(self, mocker):
-        mock_scf = mocker.MagicMock()
-        mock_lc = mocker.MagicMock()
-        mock_lc.data_received_cb = mocker.MagicMock()
-        mock_lc.data_received_cb.add_callback = mocker.MagicMock()
+        FlowDeck.get_height_mm(mock_drone, timeout_s=2.0)
 
-        mock_event = mocker.MagicMock()
-        mock_event.wait.return_value = False
+        config = mock_drone.subscribe_log.call_args[0][0]
+        assert config.variables == (LogVariable("range.zrange", "uint16_t"),)
+        assert config.period_ms == 100
 
-        mocker.patch("Crazyflie.decks.flow_deck.LogConfig", return_value=mock_lc)
-        mocker.patch("Crazyflie.decks.flow_deck.Event", return_value=mock_event)
+    def test_passes_timeout_to_event_wait(self, mock_drone, mocker):
+        event = mocker.patch("Crazyflie.decks.flow_deck.Event").return_value
+        event.wait.return_value = False
 
-        FlowDeck.get_height_mm(mock_scf, timeout_s=2.0)
+        FlowDeck.get_height_mm(mock_drone, timeout_s=3.5)
 
-        mock_lc.stop.assert_called_once()
-
-    def test_uses_range_zrange_variable(self, mocker):
-        mock_scf = mocker.MagicMock()
-        mock_lc = mocker.MagicMock()
-        mock_lc.data_received_cb = mocker.MagicMock()
-        mock_lc.data_received_cb.add_callback = mocker.MagicMock()
-
-        mock_event = mocker.MagicMock()
-        mock_event.wait.return_value = False
-
-        mocker.patch("Crazyflie.decks.flow_deck.LogConfig", return_value=mock_lc)
-        mocker.patch("Crazyflie.decks.flow_deck.Event", return_value=mock_event)
-
-        FlowDeck.get_height_mm(mock_scf, timeout_s=2.0)
-
-        mock_lc.add_variable.assert_called_once_with("range.zrange", "uint16_t")
-
-    def test_passes_timeout_to_event_wait(self, mocker):
-        mock_scf = mocker.MagicMock()
-        mock_lc = mocker.MagicMock()
-        mock_lc.data_received_cb = mocker.MagicMock()
-        mock_lc.data_received_cb.add_callback = mocker.MagicMock()
-
-        mock_event = mocker.MagicMock()
-        mock_event.wait.return_value = False
-
-        mocker.patch("Crazyflie.decks.flow_deck.LogConfig", return_value=mock_lc)
-        mocker.patch("Crazyflie.decks.flow_deck.Event", return_value=mock_event)
-
-        FlowDeck.get_height_mm(mock_scf, timeout_s=3.5)
-
-        mock_event.wait.assert_called_once_with(timeout=3.5)
+        event.wait.assert_called_once_with(timeout=3.5)

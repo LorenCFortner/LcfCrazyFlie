@@ -83,6 +83,25 @@ class TestLifecycleWiring:
         assert hooks.pre_flight_fn is pre_fn
         assert hooks.post_flight_fn is post_fn
 
+    def test_supplied_connect_fn_is_passed_to_lifecycle(self, mocker):
+        mock_run = _capture_lifecycle_call(mocker)
+        connect_fn = mocker.MagicMock()
+
+        run_out_and_back_flight(
+            _PATH, uri="radio://0/1/250K", description="t", connect_fn=connect_fn
+        )
+
+        _, kwargs = mock_run.call_args
+        assert kwargs["connect_fn"] is connect_fn
+
+    def test_connect_fn_defaults_to_none_so_lifecycle_uses_connect_cflib(self, mocker):
+        mock_run = _capture_lifecycle_call(mocker)
+
+        run_out_and_back_flight(_PATH, uri="radio://0/1/250K", description="t")
+
+        _, kwargs = mock_run.call_args
+        assert kwargs["connect_fn"] is None
+
 
 # ---------------------------------------------------------------------------
 # AdaptivePathCorrector hook
@@ -95,12 +114,12 @@ class TestAdaptiveCorrectorHook:
             "Crazyflie.flight.out_and_back_runner.AdaptivePathCorrector"
         )
         _, hooks = _run_and_get_body_and_hooks(mocker)
-        fake_scf = mocker.MagicMock()
+        fake_drone = mocker.MagicMock()
         fake_flight_state = mocker.MagicMock()
 
-        result = hooks.make_adaptive_corrector(fake_scf, fake_flight_state)
+        result = hooks.make_adaptive_corrector(fake_drone, fake_flight_state)
 
-        mock_corrector_cls.assert_called_once_with(fake_scf, fake_flight_state)
+        mock_corrector_cls.assert_called_once_with(fake_drone, fake_flight_state)
         assert result is mock_corrector_cls.return_value
 
 

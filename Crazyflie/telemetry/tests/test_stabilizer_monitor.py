@@ -1,6 +1,6 @@
 """Tests for StabilizerMonitor.
 
-The threading/SyncLogger boundary is hard to unit test, so the safety
+The threading/log stream boundary is hard to unit test, so the safety
 checks are extracted as pure functions and tested exhaustively here.
 Thread lifecycle (start/stop) is tested separately with mocks.
 """
@@ -230,17 +230,17 @@ class TestCheckPitch:
 
 
 class TestStabilizerMonitorLifecycle:
-    def test_start_launches_a_thread(self, mock_scf, mock_queue, mocker):
+    def test_start_launches_a_thread(self, mock_drone, mock_queue, mocker):
         mock_thread = mocker.patch("Crazyflie.telemetry.stabilizer_monitor.threading.Thread")
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
 
         monitor.start()
 
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once()
 
-    def test_stop_sets_stop_flag(self, mock_scf, mock_queue):
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_stop_sets_stop_flag(self, mock_drone, mock_queue):
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
 
         monitor.stop()
 
@@ -248,36 +248,36 @@ class TestStabilizerMonitorLifecycle:
 
 
 class TestIsTriggered:
-    def test_is_false_initially(self, mock_scf, mock_queue):
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_is_false_initially(self, mock_drone, mock_queue):
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
 
         assert monitor.is_triggered() is False
 
-    def test_is_true_when_triggered_flag_set(self, mock_scf, mock_queue):
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_is_true_when_triggered_flag_set(self, mock_drone, mock_queue):
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
         monitor._triggered = True
 
         assert monitor.is_triggered() is True
 
-    def test_remains_false_when_no_safety_event(self, mock_scf, mock_queue):
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_remains_false_when_no_safety_event(self, mock_drone, mock_queue):
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
         monitor._triggered = False
 
         assert monitor.is_triggered() is False
 
 
 class TestJoin:
-    def test_join_calls_thread_join_with_timeout(self, mock_scf, mock_queue, mocker):
+    def test_join_calls_thread_join_with_timeout(self, mock_drone, mock_queue, mocker):
         mock_thread = mocker.MagicMock()
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
         monitor._thread = mock_thread
 
         monitor.join(timeout=2.0)
 
         mock_thread.join.assert_called_once_with(timeout=2.0)
 
-    def test_join_does_nothing_when_thread_is_none(self, mock_scf, mock_queue):
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_join_does_nothing_when_thread_is_none(self, mock_drone, mock_queue):
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
         monitor._thread = None
 
         monitor.join()  # should not raise
@@ -306,40 +306,35 @@ class TestRun:
             None,
         )
 
-    def _patch_sync_logger(self, mocker, entries: list):
-        mock_logger = mocker.MagicMock()
-        mock_logger.__enter__ = mocker.MagicMock(return_value=mock_logger)
-        mock_logger.__exit__ = mocker.MagicMock(return_value=False)
-        mock_logger.__iter__ = mocker.MagicMock(return_value=iter(entries))
-        mocker.patch(
-            "Crazyflie.telemetry.stabilizer_monitor.SyncLogger",
-            return_value=mock_logger,
-        )
-        mocker.patch("Crazyflie.telemetry.stabilizer_monitor.LogConfig")
-        return mock_logger
+    def _patch_log_stream(self, drone, entries: list):
+        """Make drone.log_stream() yield each entry's data dict."""
+        stream = drone.log_stream.return_value
+        stream.__enter__.return_value = iter([entry[1] for entry in entries])
+        stream.__exit__.return_value = False
+        return stream
 
-    def test_run_updates_state_from_log_entry(self, mock_scf, mock_queue, mocker):
-        self._patch_sync_logger(mocker, [self._make_log_entry(roll=5.0, height=300)])
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_run_updates_state_from_log_entry(self, mock_drone, mock_queue, mocker):
+        self._patch_log_stream(mock_drone, [self._make_log_entry(roll=5.0, height=300)])
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
 
         monitor._run()
 
         assert monitor.state.roll_deg == pytest.approx(5.0)
         assert monitor.state.height_mm == 300
 
-    def test_run_stops_immediately_when_stop_requested(self, mock_scf, mock_queue, mocker):
-        self._patch_sync_logger(mocker, [self._make_log_entry()])
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_run_stops_immediately_when_stop_requested(self, mock_drone, mock_queue, mocker):
+        self._patch_log_stream(mock_drone, [self._make_log_entry()])
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
         monitor._stop_requested = True
 
         monitor._run()  # should complete without hanging
 
     def test_run_posts_batlow_and_sets_triggered_on_low_battery(
-        self, mock_scf, mock_queue, mocker
+        self, mock_drone, mock_queue, mocker
     ):
         eq: queue.Queue[str] = queue.Queue()
-        self._patch_sync_logger(mocker, [self._make_log_entry(battery_v=3.0)])
-        monitor = StabilizerMonitor(mock_scf, eq)
+        self._patch_log_stream(mock_drone, [self._make_log_entry(battery_v=3.0)])
+        monitor = StabilizerMonitor(mock_drone, eq)
 
         monitor._run()
 
@@ -347,11 +342,11 @@ class TestRun:
         assert monitor.is_triggered() is True
 
     def test_run_posts_crash_and_sets_triggered_on_roll_exceeded(
-        self, mock_scf, mock_queue, mocker
+        self, mock_drone, mock_queue, mocker
     ):
         eq: queue.Queue[str] = queue.Queue()
-        self._patch_sync_logger(mocker, [self._make_log_entry(roll=30.0)])
-        monitor = StabilizerMonitor(mock_scf, eq)
+        self._patch_log_stream(mock_drone, [self._make_log_entry(roll=30.0)])
+        monitor = StabilizerMonitor(mock_drone, eq)
 
         monitor._run()
 
@@ -359,30 +354,30 @@ class TestRun:
         assert monitor.is_triggered() is True
 
     def test_run_posts_crash_and_sets_triggered_on_pitch_exceeded(
-        self, mock_scf, mock_queue, mocker
+        self, mock_drone, mock_queue, mocker
     ):
         eq: queue.Queue[str] = queue.Queue()
-        self._patch_sync_logger(mocker, [self._make_log_entry(pitch=-30.0)])
-        monitor = StabilizerMonitor(mock_scf, eq)
+        self._patch_log_stream(mock_drone, [self._make_log_entry(pitch=-30.0)])
+        monitor = StabilizerMonitor(mock_drone, eq)
 
         monitor._run()
 
         assert eq.get_nowait() == "CRASH"
         assert monitor.is_triggered() is True
 
-    def test_run_does_not_set_triggered_when_all_nominal(self, mock_scf, mock_queue, mocker):
+    def test_run_does_not_set_triggered_when_all_nominal(self, mock_drone, mock_queue, mocker):
         eq: queue.Queue[str] = queue.Queue()
-        self._patch_sync_logger(mocker, [self._make_log_entry(battery_v=4.0)])
-        monitor = StabilizerMonitor(mock_scf, eq)
+        self._patch_log_stream(mock_drone, [self._make_log_entry(battery_v=4.0)])
+        monitor = StabilizerMonitor(mock_drone, eq)
 
         monitor._run()
 
         assert eq.empty()
         assert monitor.is_triggered() is False
 
-    def test_run_sets_first_reading_event_after_first_packet(self, mock_scf, mock_queue, mocker):
-        self._patch_sync_logger(mocker, [self._make_log_entry()])
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_run_sets_first_reading_event_after_first_packet(self, mock_drone, mock_queue, mocker):
+        self._patch_log_stream(mock_drone, [self._make_log_entry()])
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
 
         monitor._run()
 
@@ -414,56 +409,51 @@ class TestFlightRecorderIntegration:
             None,
         )
 
-    def _patch_sync_logger(self, mocker, entries: list):
-        mock_logger = mocker.MagicMock()
-        mock_logger.__enter__ = mocker.MagicMock(return_value=mock_logger)
-        mock_logger.__exit__ = mocker.MagicMock(return_value=False)
-        mock_logger.__iter__ = mocker.MagicMock(return_value=iter(entries))
-        mocker.patch(
-            "Crazyflie.telemetry.stabilizer_monitor.SyncLogger",
-            return_value=mock_logger,
-        )
-        mocker.patch("Crazyflie.telemetry.stabilizer_monitor.LogConfig")
-        return mock_logger
+    def _patch_log_stream(self, drone, entries: list):
+        """Make drone.log_stream() yield each entry's data dict."""
+        stream = drone.log_stream.return_value
+        stream.__enter__.return_value = iter([entry[1] for entry in entries])
+        stream.__exit__.return_value = False
+        return stream
 
     def test_records_state_on_each_reading_when_recorder_attached(
-        self, mock_scf, mock_queue, mocker
+        self, mock_drone, mock_queue, mocker
     ):
         mock_recorder = mocker.MagicMock()
-        self._patch_sync_logger(mocker, [self._make_log_entry(roll=5.0, height=300)])
-        monitor = StabilizerMonitor(mock_scf, mock_queue, recorder=mock_recorder)
+        self._patch_log_stream(mock_drone, [self._make_log_entry(roll=5.0, height=300)])
+        monitor = StabilizerMonitor(mock_drone, mock_queue, recorder=mock_recorder)
 
         monitor._run()
 
         mock_recorder.record_stabilizer.assert_called_once_with(monitor.state)
 
-    def test_records_once_per_log_entry(self, mock_scf, mock_queue, mocker):
+    def test_records_once_per_log_entry(self, mock_drone, mock_queue, mocker):
         mock_recorder = mocker.MagicMock()
-        self._patch_sync_logger(
-            mocker, [self._make_log_entry(roll=1.0), self._make_log_entry(roll=2.0)]
+        self._patch_log_stream(
+            mock_drone, [self._make_log_entry(roll=1.0), self._make_log_entry(roll=2.0)]
         )
-        monitor = StabilizerMonitor(mock_scf, mock_queue, recorder=mock_recorder)
+        monitor = StabilizerMonitor(mock_drone, mock_queue, recorder=mock_recorder)
 
         monitor._run()
 
         assert mock_recorder.record_stabilizer.call_count == 2
 
-    def test_does_not_record_when_no_recorder(self, mock_scf, mock_queue, mocker):
-        self._patch_sync_logger(mocker, [self._make_log_entry()])
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_does_not_record_when_no_recorder(self, mock_drone, mock_queue, mocker):
+        self._patch_log_stream(mock_drone, [self._make_log_entry()])
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
 
         monitor._run()  # should not raise without a recorder
 
 
 class TestWaitForFirstReading:
-    def test_returns_true_when_event_already_set(self, mock_scf, mock_queue):
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_returns_true_when_event_already_set(self, mock_drone, mock_queue):
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
         monitor._first_reading_event.set()
 
         assert monitor.wait_for_first_reading(timeout_s=1.0) is True
 
-    def test_returns_false_when_timeout_expires(self, mock_scf, mock_queue):
-        monitor = StabilizerMonitor(mock_scf, mock_queue)
+    def test_returns_false_when_timeout_expires(self, mock_drone, mock_queue):
+        monitor = StabilizerMonitor(mock_drone, mock_queue)
         # Event never set - should time out immediately
 
         assert monitor.wait_for_first_reading(timeout_s=0.01) is False

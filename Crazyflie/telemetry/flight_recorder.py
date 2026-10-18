@@ -13,9 +13,9 @@ configs, limited radio log bandwidth) - see Crazyflie.decks.multi_ranger.
 Example:
     >>> recorder = FlightRecorder()
     >>> recorder.start(Path("scripts/logs/my_flight_telemetry.csv"))
-    >>> collision_monitor = CollisionMonitor(scf, event_queue, recorder=recorder)
-    >>> stabilizer_monitor = StabilizerMonitor(scf, event_queue, recorder=recorder)
-    >>> link_monitor = LinkMonitor(scf, event_queue, recorder=recorder)
+    >>> collision_monitor = CollisionMonitor(drone, event_queue, recorder=recorder)
+    >>> stabilizer_monitor = StabilizerMonitor(drone, event_queue, recorder=recorder)
+    >>> link_monitor = LinkMonitor(drone, event_queue, recorder=recorder)
     >>> # ... flight happens ...
     >>> recorder.stop()
 """

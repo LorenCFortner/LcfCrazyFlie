@@ -20,10 +20,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from cflib.crazyflie.log import LogConfig
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-from cflib.crazyflie.syncLogger import SyncLogger
-
+from Crazyflie.hardware.drone_connection import DroneConnection, LogStreamConfig, LogVariable
 from Crazyflie.telemetry.flight_recorder import FlightRecorder
 
 MIN_BATTERY_VOLTAGE_V = 3.4
@@ -142,7 +139,7 @@ class StabilizerMonitor:
 
     Example:
         >>> event_queue = queue.Queue()
-        >>> monitor = StabilizerMonitor(scf, event_queue)
+        >>> monitor = StabilizerMonitor(drone, event_queue)
         >>> monitor.start()
         >>> # ... flight happens ...
         >>> monitor.stop()
@@ -150,7 +147,7 @@ class StabilizerMonitor:
 
     def __init__(
         self,
-        scf: SyncCrazyflie,
+        drone: DroneConnection,
         event_queue: queue.Queue[str],
         max_roll_deg: float = MAX_ROLL_DEG,
         max_pitch_deg: float = MAX_PITCH_DEG,
@@ -161,7 +158,7 @@ class StabilizerMonitor:
         """Initialize the monitor.
 
         Args:
-            scf: Connected SyncCrazyflie instance.
+            drone: Connected drone.
             event_queue: Queue to post "BATLOW" / "CRASH" messages to.
             max_roll_deg: Roll limit before CRASH is posted.
             max_pitch_deg: Pitch limit before CRASH is posted.
@@ -171,7 +168,7 @@ class StabilizerMonitor:
                 telemetry sample (not just BATLOW/CRASH events) is written
                 to its telemetry CSV.
         """
-        self._scf = scf
+        self._drone = drone
         self._event_queue = event_queue
         self._max_roll_deg = max_roll_deg
         self._max_pitch_deg = max_pitch_deg
@@ -233,20 +230,24 @@ class StabilizerMonitor:
 
     def _run(self) -> None:
         """Background thread: streams telemetry and checks safety limits."""
-        lg = LogConfig(name="Stabilizer", period_in_ms=self._ms_between_updates)
-        lg.add_variable("stabilizer.roll", "float")
-        lg.add_variable("stabilizer.pitch", "float")
-        lg.add_variable("stabilizer.yaw", "float")
-        lg.add_variable("range.zrange", "uint16_t")
-        lg.add_variable("pm.vbat", "float")
-        lg.add_variable("pm.state", "uint8_t")
+        config = LogStreamConfig(
+            name="Stabilizer",
+            period_ms=self._ms_between_updates,
+            variables=(
+                LogVariable("stabilizer.roll", "float"),
+                LogVariable("stabilizer.pitch", "float"),
+                LogVariable("stabilizer.yaw", "float"),
+                LogVariable("range.zrange", "uint16_t"),
+                LogVariable("pm.vbat", "float"),
+                LogVariable("pm.state", "uint8_t"),
+            ),
+        )
 
-        with SyncLogger(self._scf, lg) as logger:
-            for log_entry in logger:
+        with self._drone.log_stream(config) as samples:
+            for data in samples:
                 if self._stop_requested:
                     break
 
-                data = log_entry[1]
                 update_state_from_log(self.state, data)
                 if self._recorder is not None:
                     self._recorder.record_stabilizer(self.state)

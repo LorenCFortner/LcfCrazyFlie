@@ -1,20 +1,40 @@
 """Flow deck telemetry reader for Crazyflie 2.0.
 
 The flow deck provides optical flow positioning and height-above-ground
-via range.zrange (in mm). This module streams those values via LogConfig
+via range.zrange (in mm). This module streams those values via a log subscription
 and exposes them as a context manager, matching the MultiRangerDeck pattern.
 """
 
 import logging
 from dataclasses import dataclass
 from threading import Event
+from typing import Any
 
-from cflib.crazyflie.log import LogConfig
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
+from Crazyflie.hardware.drone_connection import (
+    DroneConnection,
+    LogStreamConfig,
+    LogSubscription,
+    LogVariable,
+)
 
 logger = logging.getLogger(__name__)
 
 _LOG_PERIOD_MS: int = 100
+
+_FLOW_STREAM = LogStreamConfig(
+    name="FlowDeck",
+    period_ms=_LOG_PERIOD_MS,
+    variables=(
+        LogVariable("range.zrange", "uint16_t"),
+        LogVariable("motion.deltaX", "int16_t"),
+        LogVariable("motion.deltaY", "int16_t"),
+    ),
+)
+_HEIGHT_STREAM = LogStreamConfig(
+    name="FlowDeckHeight",
+    period_ms=_LOG_PERIOD_MS,
+    variables=(LogVariable("range.zrange", "uint16_t"),),
+)
 
 
 @dataclass
@@ -38,56 +58,48 @@ class FlowDeckReadings:
 class FlowDeck:
     """Streams height and optical flow data from the flow deck.
 
-    Reads range.zrange (mm), motion.deltaX, and motion.deltaY via LogConfig
-    at 100 ms intervals. Use as a context manager - logging starts on entry
+    Reads range.zrange (mm), motion.deltaX, and motion.deltaY via a log
+    subscription at 100 ms intervals. Use as a context manager - logging starts on entry
     and stops on exit.
 
     Example:
-        >>> with SyncCrazyflie(URI) as scf:
-        ...     with FlowDeck(scf) as deck:
+        >>> with connect_cflib(URI) as drone:
+        ...     with FlowDeck(drone) as deck:
         ...         readings = deck.get_readings()
         ...         print(f"Height: {readings.height_mm} mm")
 
     For a one-shot height read without managing the context yourself:
 
-        >>> with SyncCrazyflie(URI) as scf:
-        ...     height_mm = FlowDeck.get_height_mm(scf)
+        >>> with connect_cflib(URI) as drone:
+        ...     height_mm = FlowDeck.get_height_mm(drone)
     """
 
-    def __init__(self, scf: SyncCrazyflie) -> None:
+    def __init__(self, drone: DroneConnection) -> None:
         """Initialize the deck interface.
 
         Args:
-            scf: Connected SyncCrazyflie instance.
+            drone: Connected drone.
         """
-        self._scf = scf
-        self._log_config: LogConfig | None = None
+        self._drone = drone
+        self._subscription: LogSubscription | None = None
         self._height_mm: float | None = None
         self._delta_x: float | None = None
         self._delta_y: float | None = None
 
     def __enter__(self) -> FlowDeck:
-        self._log_config = LogConfig(name="FlowDeck", period_in_ms=_LOG_PERIOD_MS)
-        self._log_config.add_variable("range.zrange", "uint16_t")
-        self._log_config.add_variable("motion.deltaX", "int16_t")
-        self._log_config.add_variable("motion.deltaY", "int16_t")
-        self._log_config.data_received_cb.add_callback(self._on_data)
-        self._scf.cf.log.add_config(self._log_config)
-        self._log_config.start()
+        self._subscription = self._drone.subscribe_log(_FLOW_STREAM, self._on_data)
         return self
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
-        if self._log_config is not None:
-            self._log_config.stop()
-            self._log_config = None
+        if self._subscription is not None:
+            self._subscription.stop()
+            self._subscription = None
 
-    def _on_data(self, timestamp: int, data: dict[str, float], log_config: LogConfig) -> None:
-        """Callback invoked by cflib each time a log packet arrives.
+    def _on_data(self, data: dict[str, Any]) -> None:
+        """Callback invoked each time a log packet arrives.
 
         Args:
-            timestamp: Timestamp in milliseconds from the drone.
             data: Dict mapping variable names to their current values.
-            log_config: The LogConfig that produced this data.
         """
         self._height_mm = data.get("range.zrange")
         self._delta_x = data.get("motion.deltaX")
@@ -122,15 +134,15 @@ class FlowDeck:
         )
 
     @staticmethod
-    def get_height_mm(scf: SyncCrazyflie, timeout_s: float = 2.0) -> float | None:
+    def get_height_mm(drone: DroneConnection, timeout_s: float = 2.0) -> float | None:
         """Read height above ground once and return it.
 
-        Starts a temporary LogConfig, waits for the first range.zrange
-        reading, then stops logging. Uses threading.Event with timeout
-        because SyncLogger blocks indefinitely.
+        Starts a temporary log subscription, waits for the first range.zrange
+        reading, then stops it. Uses threading.Event with timeout because a
+        blocking log iterator never times out.
 
         Args:
-            scf: Connected SyncCrazyflie instance.
+            drone: Connected drone.
             timeout_s: Maximum time to wait for a reading. Defaults to 2.0s.
 
         Returns:
@@ -139,24 +151,17 @@ class FlowDeck:
         container: dict[str, float] = {}
         ready = Event()
 
-        log_config = LogConfig(name="FlowDeckHeight", period_in_ms=_LOG_PERIOD_MS)
-        log_config.add_variable("range.zrange", "uint16_t")
-
-        def on_data(timestamp: int, data: dict[str, float], lc: LogConfig) -> None:
+        def on_data(data: dict[str, Any]) -> None:
             if "range.zrange" in data:
                 container["height_mm"] = float(data["range.zrange"])
                 ready.set()
 
-        log_config.data_received_cb.add_callback(on_data)
-
+        subscription = drone.subscribe_log(_HEIGHT_STREAM, on_data)
         try:
-            scf.cf.log.add_config(log_config)
-            log_config.start()
-
             if ready.wait(timeout=timeout_s):
                 return container.get("height_mm")
 
             logger.warning(f"Timeout after {timeout_s}s waiting for range.zrange")
             return None
         finally:
-            log_config.stop()
+            subscription.stop()

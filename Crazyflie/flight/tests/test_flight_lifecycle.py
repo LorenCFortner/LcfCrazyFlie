@@ -19,6 +19,7 @@ from Crazyflie.flight.flight_lifecycle import (
     handle_safety_events,
     run_flight_lifecycle,
 )
+from Crazyflie.hardware.drone_connection import DroneConnection
 
 # ---------------------------------------------------------------------------
 # handle_safety_events
@@ -358,19 +359,20 @@ def _mock_flight_hardware(mocker: Any, *, clearance_ok: bool = True) -> dict[str
     Returns:
         Dict of mocks/patches a caller may need to inspect afterward.
     """
-    mock_scf_instance = mocker.MagicMock()
-    mock_scf_cm = mocker.MagicMock()
-    mock_scf_cm.__enter__ = mocker.MagicMock(return_value=mock_scf_instance)
-    mock_scf_cm.__exit__ = mocker.MagicMock(return_value=False)
-    mocker.patch("Crazyflie.flight.flight_lifecycle.SyncCrazyflie", return_value=mock_scf_cm)
+    mock_drone = mocker.MagicMock(spec=DroneConnection)
+    mock_drone_cm = mocker.MagicMock()
+    mock_drone_cm.__enter__.return_value = mock_drone
+    mock_drone_cm.__exit__.return_value = False
+    connect_cflib = mocker.patch(
+        "Crazyflie.flight.flight_lifecycle.connect_cflib", return_value=mock_drone_cm
+    )
 
     mock_mc_instance = mocker.MagicMock()
     mock_mc_cm = mocker.MagicMock()
-    mock_mc_cm.__enter__ = mocker.MagicMock(return_value=mock_mc_instance)
-    mock_mc_cm.__exit__ = mocker.MagicMock(return_value=False)
-    mocker.patch("Crazyflie.flight.flight_lifecycle.MotionCommander", return_value=mock_mc_cm)
+    mock_mc_cm.__enter__.return_value = mock_mc_instance
+    mock_mc_cm.__exit__.return_value = False
+    mock_drone.motion_commander.return_value = mock_mc_cm
 
-    mocker.patch("Crazyflie.flight.flight_lifecycle.cflib.crtp.init_drivers")
     mocker.patch(
         "Crazyflie.flight.flight_lifecycle.check_preflight_clearance", return_value=clearance_ok
     )
@@ -406,7 +408,9 @@ def _mock_flight_hardware(mocker: Any, *, clearance_ok: bool = True) -> dict[str
         "link_cls": link_cls,
         "mock_link": mock_link,
         "mock_mc": mock_mc_instance,
-        "mock_scf": mock_scf_instance,
+        "mock_drone": mock_drone,
+        "mock_drone_cm": mock_drone_cm,
+        "connect_cflib": connect_cflib,
     }
 
 
@@ -418,12 +422,11 @@ def _mock_flight_hardware(mocker: Any, *, clearance_ok: bool = True) -> dict[str
 class TestPreflightClearance:
     def test_aborts_before_takeoff_when_clearance_fails(self, mocker):
         mocks = _mock_flight_hardware(mocker, clearance_ok=False)
-        mock_mc_cls = mocker.patch("Crazyflie.flight.flight_lifecycle.MotionCommander")
         body = mocker.MagicMock()
 
         run_flight_lifecycle("radio://0/80/2M", body)
 
-        mock_mc_cls.assert_not_called()
+        mocks["mock_drone"].motion_commander.assert_not_called()
         body.assert_not_called()
         mocks["mock_collision"].start.assert_not_called()
 
@@ -505,7 +508,7 @@ class TestMonitorWiring:
 
 
 class TestLinkMonitorWiring:
-    def test_constructed_with_scf_and_shared_event_queue(self, mocker):
+    def test_constructed_with_drone_and_shared_event_queue(self, mocker):
         mocks = _mock_flight_hardware(mocker)
         body = mocker.MagicMock()
 
@@ -513,7 +516,7 @@ class TestLinkMonitorWiring:
 
         args, _ = mocks["link_cls"].call_args
         (ctx,), _ = body.call_args
-        assert args[0] is mocks["mock_scf"]
+        assert args[0] is mocks["mock_drone"]
         assert args[1] is ctx.event_queue
 
     def test_started_before_collision_monitor(self, mocker):
@@ -583,7 +586,7 @@ class TestAdaptiveCorrectorHook:
         _, kwargs = mocks["collision_cls"].call_args
         assert kwargs.get("adaptive_corrector") is None
 
-    def test_corrector_constructed_via_hook_with_scf_and_flight_state(self, mocker):
+    def test_corrector_constructed_via_hook_with_drone_and_flight_state(self, mocker):
         mocks = _mock_flight_hardware(mocker)
         mock_corrector = mocker.MagicMock()
         make_corrector = mocker.MagicMock(return_value=mock_corrector)
@@ -591,7 +594,7 @@ class TestAdaptiveCorrectorHook:
 
         run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock(), hooks=hooks)
 
-        make_corrector.assert_called_once_with(mocks["mock_scf"], mocker.ANY)
+        make_corrector.assert_called_once_with(mocks["mock_drone"], mocker.ANY)
 
     def test_corrector_started_before_collision_monitor_started(self, mocker):
         mocks = _mock_flight_hardware(mocker)
@@ -599,7 +602,7 @@ class TestAdaptiveCorrectorHook:
         mock_corrector = mocker.MagicMock()
         mock_corrector.start.side_effect = lambda: call_order.append("corrector.start")
         mocks["mock_collision"].start.side_effect = lambda: call_order.append("collision.start")
-        hooks = FlightLifecycleHooks(make_adaptive_corrector=lambda scf, fs: mock_corrector)
+        hooks = FlightLifecycleHooks(make_adaptive_corrector=lambda drone, fs: mock_corrector)
 
         run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock(), hooks=hooks)
 
@@ -608,7 +611,7 @@ class TestAdaptiveCorrectorHook:
     def test_corrector_passed_to_collision_monitor(self, mocker):
         mocks = _mock_flight_hardware(mocker)
         mock_corrector = mocker.MagicMock()
-        hooks = FlightLifecycleHooks(make_adaptive_corrector=lambda scf, fs: mock_corrector)
+        hooks = FlightLifecycleHooks(make_adaptive_corrector=lambda drone, fs: mock_corrector)
 
         run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock(), hooks=hooks)
 
@@ -618,7 +621,7 @@ class TestAdaptiveCorrectorHook:
     def test_corrector_stopped_and_joined_in_teardown(self, mocker):
         _mock_flight_hardware(mocker)
         mock_corrector = mocker.MagicMock()
-        hooks = FlightLifecycleHooks(make_adaptive_corrector=lambda scf, fs: mock_corrector)
+        hooks = FlightLifecycleHooks(make_adaptive_corrector=lambda drone, fs: mock_corrector)
 
         run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock(), hooks=hooks)
 
@@ -651,7 +654,7 @@ class TestFlightBodyInvocation:
     def test_body_receives_adaptive_corrector_when_hook_given(self, mocker):
         _mock_flight_hardware(mocker)
         mock_corrector = mocker.MagicMock()
-        hooks = FlightLifecycleHooks(make_adaptive_corrector=lambda scf, fs: mock_corrector)
+        hooks = FlightLifecycleHooks(make_adaptive_corrector=lambda drone, fs: mock_corrector)
         body = mocker.MagicMock()
 
         run_flight_lifecycle("radio://0/80/2M", body, hooks=hooks)
@@ -857,3 +860,69 @@ class TestPrePostFlightHooks:
 
         pre_fn.assert_called_once()
         post_fn.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Connection - connect_fn seam, arming and stop-setpoint teardown
+# ---------------------------------------------------------------------------
+
+
+class TestConnection:
+    def test_default_connects_with_connect_cflib_for_the_uri(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+
+        run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock())
+
+        mocks["connect_cflib"].assert_called_once_with("radio://0/80/2M")
+
+    def test_supplied_connect_fn_is_used_instead_of_connect_cflib(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+        other_drone = mocker.MagicMock(spec=DroneConnection)
+        other_cm = mocker.MagicMock()
+        other_cm.__enter__.return_value = other_drone
+        other_cm.__exit__.return_value = False
+        connect_fn = mocker.MagicMock(return_value=other_cm)
+
+        run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock(), connect_fn=connect_fn)
+
+        connect_fn.assert_called_once_with()
+        mocks["connect_cflib"].assert_not_called()
+        args, _ = mocks["link_cls"].call_args
+        assert args[0] is other_drone
+
+    def test_stop_setpoints_then_arm_on_connect(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+
+        run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock())
+
+        names = [c[0] for c in mocks["mock_drone"].method_calls]
+        assert names[:2] == ["stop_setpoints", "arm"]
+
+    def test_stop_setpoints_again_in_teardown(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+
+        run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock())
+
+        assert mocks["mock_drone"].stop_setpoints.call_count == 2
+        assert mocks["mock_drone"].method_calls[-1][0] == "stop_setpoints"
+
+    def test_stop_setpoints_in_teardown_when_body_raises(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+        body = mocker.MagicMock(side_effect=RuntimeError("boom"))
+
+        run_flight_lifecycle("radio://0/80/2M", body)  # must not raise
+
+        assert mocks["mock_drone"].stop_setpoints.call_count == 2
+
+    def test_teardown_stop_setpoints_failure_does_not_propagate(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+        mocks["mock_drone"].stop_setpoints.side_effect = [None, RuntimeError("link gone")]
+
+        run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock())  # must not raise
+
+    def test_link_closed_after_flight(self, mocker):
+        mocks = _mock_flight_hardware(mocker)
+
+        run_flight_lifecycle("radio://0/80/2M", mocker.MagicMock())
+
+        mocks["mock_drone_cm"].__exit__.assert_called_once()

@@ -31,11 +31,10 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from cflib.positioning.motion_commander import MotionCommander
-
 from Crazyflie.flight.collision_return import CollisionContext
 from Crazyflie.flight.out_and_back_runner import run_out_and_back_flight
 from Crazyflie.flight.path_runner import FlightStep
+from Crazyflie.hardware.drone_connection import MotionControl
 from Crazyflie.observability.run_logging import configure_run_logging
 from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
 from Crazyflie.state.flight_state import FlightState
@@ -55,7 +54,7 @@ OUT_AND_BACK_PATH = [
 
 
 def _on_collision(
-    mc: MotionCommander,
+    mc: MotionControl,
     context: CollisionContext,
     should_abort: Callable[[], bool],
     flight_state: FlightState,
@@ -77,7 +76,7 @@ def _on_collision(
     forward the outstanding distance to return to the start point.
 
     Args:
-        mc: Active MotionCommander instance.
+        mc: Active MotionControl instance.
         context: Flight progress snapshot from the collision.
         should_abort: Unused - this script's return leg is unmonitored.
         flight_state: Unused - this script's return leg is unmonitored.

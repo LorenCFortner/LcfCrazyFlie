@@ -62,11 +62,6 @@ class TestCheckLinkQuality:
 
 
 @pytest.fixture
-def mock_scf(mocker):
-    return mocker.MagicMock()
-
-
-@pytest.fixture
 def mock_queue(mocker):
     return mocker.MagicMock()
 
@@ -77,41 +72,37 @@ def mock_queue(mocker):
 
 
 class TestStartStop:
-    def test_start_registers_link_quality_callback(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_start_registers_link_quality_callback(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
 
         monitor.start()
 
-        mock_scf.cf.link_statistics.link_quality_updated.add_callback.assert_called_once_with(
-            monitor._on_link_quality
-        )
+        mock_drone.add_link_quality_callback.assert_called_once_with(monitor._on_link_quality)
 
-    def test_start_registers_uplink_rssi_callback(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_start_registers_uplink_rssi_callback(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
 
         monitor.start()
 
-        mock_scf.cf.link_statistics.uplink_rssi_updated.add_callback.assert_called_once_with(
-            monitor._on_uplink_rssi
-        )
+        mock_drone.add_uplink_rssi_callback.assert_called_once_with(monitor._on_uplink_rssi)
 
-    def test_start_launches_a_thread(self, mock_scf, mock_queue, mocker):
+    def test_start_launches_a_thread(self, mock_drone, mock_queue, mocker):
         mock_thread = mocker.patch("Crazyflie.telemetry.link_monitor.threading.Thread")
-        monitor = LinkMonitor(mock_scf, mock_queue)
+        monitor = LinkMonitor(mock_drone, mock_queue)
 
         monitor.start()
 
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once()
 
-    def test_stop_sets_stop_flag(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_stop_sets_stop_flag(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
 
         monitor.stop()
 
         assert monitor._stop_requested is True
 
-    def test_stop_without_start_does_not_raise(self, mock_scf, mock_queue):
+    def test_stop_without_start_does_not_raise(self, mock_drone, mock_queue):
         """cflib's real Caller.remove_callback() raises ValueError on a
         callback that was never registered (plain list.remove()) -- unlike
         a bare MagicMock, which would silently tolerate this and hide the
@@ -119,46 +110,42 @@ class TestStartStop:
         since it's called unguarded in run_flight_lifecycle()'s finally
         block, ahead of cleanup that must still run afterward.
         """
-        mock_scf.cf.link_statistics.link_quality_updated.remove_callback.side_effect = ValueError
-        mock_scf.cf.link_statistics.uplink_rssi_updated.remove_callback.side_effect = ValueError
-        monitor = LinkMonitor(mock_scf, mock_queue)
+        mock_drone.remove_link_quality_callback.side_effect = ValueError
+        mock_drone.remove_uplink_rssi_callback.side_effect = ValueError
+        monitor = LinkMonitor(mock_drone, mock_queue)
 
         monitor.stop()  # should not raise
 
-    def test_stop_called_twice_does_not_raise(self, mock_scf, mock_queue):
-        mock_scf.cf.link_statistics.link_quality_updated.remove_callback.side_effect = [
+    def test_stop_called_twice_does_not_raise(self, mock_drone, mock_queue):
+        mock_drone.remove_link_quality_callback.side_effect = [
             None,
             ValueError,
         ]
-        mock_scf.cf.link_statistics.uplink_rssi_updated.remove_callback.side_effect = [
+        mock_drone.remove_uplink_rssi_callback.side_effect = [
             None,
             ValueError,
         ]
-        monitor = LinkMonitor(mock_scf, mock_queue)
+        monitor = LinkMonitor(mock_drone, mock_queue)
         monitor.start()
 
         monitor.stop()
         monitor.stop()  # should not raise
 
-    def test_stop_removes_link_quality_callback(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_stop_removes_link_quality_callback(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
         monitor.start()
 
         monitor.stop()
 
-        mock_scf.cf.link_statistics.link_quality_updated.remove_callback.assert_called_once_with(
-            monitor._on_link_quality
-        )
+        mock_drone.remove_link_quality_callback.assert_called_once_with(monitor._on_link_quality)
 
-    def test_stop_removes_uplink_rssi_callback(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_stop_removes_uplink_rssi_callback(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
         monitor.start()
 
         monitor.stop()
 
-        mock_scf.cf.link_statistics.uplink_rssi_updated.remove_callback.assert_called_once_with(
-            monitor._on_uplink_rssi
-        )
+        mock_drone.remove_uplink_rssi_callback.assert_called_once_with(monitor._on_uplink_rssi)
 
 
 # ---------------------------------------------------------------------------
@@ -167,13 +154,13 @@ class TestStartStop:
 
 
 class TestIsTriggered:
-    def test_is_false_initially(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_is_false_initially(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
 
         assert monitor.is_triggered() is False
 
-    def test_is_true_when_triggered_flag_set(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_is_true_when_triggered_flag_set(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
         monitor._triggered = True
 
         assert monitor.is_triggered() is True
@@ -185,17 +172,17 @@ class TestIsTriggered:
 
 
 class TestJoin:
-    def test_join_calls_thread_join_with_timeout(self, mock_scf, mock_queue, mocker):
+    def test_join_calls_thread_join_with_timeout(self, mock_drone, mock_queue, mocker):
         mock_thread = mocker.MagicMock()
-        monitor = LinkMonitor(mock_scf, mock_queue)
+        monitor = LinkMonitor(mock_drone, mock_queue)
         monitor._thread = mock_thread
 
         monitor.join(timeout=2.0)
 
         mock_thread.join.assert_called_once_with(timeout=2.0)
 
-    def test_join_does_nothing_when_thread_is_none(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_join_does_nothing_when_thread_is_none(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
         monitor._thread = None
 
         monitor.join()  # should not raise
@@ -207,39 +194,39 @@ class TestJoin:
 
 
 class TestCallbacks:
-    def test_on_link_quality_updates_cache(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_on_link_quality_updates_cache(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
 
         monitor._on_link_quality(72.5)
 
         assert monitor._latest_link_quality == pytest.approx(72.5)
 
-    def test_on_uplink_rssi_updates_cache(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_on_uplink_rssi_updates_cache(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
 
         monitor._on_uplink_rssi(180.0)
 
         assert monitor._latest_uplink_rssi == pytest.approx(180.0)
 
-    def test_callbacks_do_not_touch_recorder(self, mock_scf, mock_queue, mocker):
+    def test_callbacks_do_not_touch_recorder(self, mock_drone, mock_queue, mocker):
         """Regression: callbacks run on cflib's driver thread and must not
         do file I/O directly -- only _run_once() (the polling thread) may
         record telemetry.
         """
         mock_recorder = mocker.MagicMock()
-        monitor = LinkMonitor(mock_scf, mock_queue, recorder=mock_recorder)
+        monitor = LinkMonitor(mock_drone, mock_queue, recorder=mock_recorder)
 
         monitor._on_link_quality(72.5)
         monitor._on_uplink_rssi(180.0)
 
         mock_recorder.record_link.assert_not_called()
 
-    def test_callbacks_do_not_post_to_queue(self, mock_scf, mocker):
+    def test_callbacks_do_not_post_to_queue(self, mock_drone, mocker):
         """Regression: even a below-threshold value must not post directly
         from the callback -- only _run_once() may post to the event queue.
         """
         eq: queue.Queue[str] = queue.Queue()
-        monitor = LinkMonitor(mock_scf, eq, min_link_quality_percent=50.0)
+        monitor = LinkMonitor(mock_drone, eq, min_link_quality_percent=50.0)
 
         monitor._on_link_quality(10.0)
 
@@ -252,9 +239,9 @@ class TestCallbacks:
 
 
 class TestRunOnce:
-    def test_records_latest_values(self, mock_scf, mock_queue, mocker):
+    def test_records_latest_values(self, mock_drone, mock_queue, mocker):
         mock_recorder = mocker.MagicMock()
-        monitor = LinkMonitor(mock_scf, mock_queue, recorder=mock_recorder)
+        monitor = LinkMonitor(mock_drone, mock_queue, recorder=mock_recorder)
         monitor._on_link_quality(72.5)
         monitor._on_uplink_rssi(180.0)
 
@@ -262,22 +249,24 @@ class TestRunOnce:
 
         mock_recorder.record_link.assert_called_once_with(72.5, 180.0)
 
-    def test_records_none_values_when_no_callback_received_yet(self, mock_scf, mock_queue, mocker):
+    def test_records_none_values_when_no_callback_received_yet(
+        self, mock_drone, mock_queue, mocker
+    ):
         mock_recorder = mocker.MagicMock()
-        monitor = LinkMonitor(mock_scf, mock_queue, recorder=mock_recorder)
+        monitor = LinkMonitor(mock_drone, mock_queue, recorder=mock_recorder)
 
         monitor._run_once()
 
         mock_recorder.record_link.assert_called_once_with(None, None)
 
-    def test_no_recorder_does_not_raise(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue, recorder=None)
+    def test_no_recorder_does_not_raise(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue, recorder=None)
 
         monitor._run_once()  # should not raise
 
-    def test_sets_triggered_when_below_threshold(self, mock_scf, mocker):
+    def test_sets_triggered_when_below_threshold(self, mock_drone, mocker):
         eq: queue.Queue[str] = queue.Queue()
-        monitor = LinkMonitor(mock_scf, eq, min_link_quality_percent=50.0)
+        monitor = LinkMonitor(mock_drone, eq, min_link_quality_percent=50.0)
         monitor._on_link_quality(30.0)
 
         monitor._run_once()
@@ -285,15 +274,15 @@ class TestRunOnce:
         assert monitor.is_triggered() is True
         assert eq.get_nowait() == "LOWSIGNAL"
 
-    def test_not_triggered_when_no_reading_yet(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue)
+    def test_not_triggered_when_no_reading_yet(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue)
 
         monitor._run_once()
 
         assert monitor.is_triggered() is False
 
-    def test_not_triggered_when_above_threshold(self, mock_scf, mock_queue):
-        monitor = LinkMonitor(mock_scf, mock_queue, min_link_quality_percent=50.0)
+    def test_not_triggered_when_above_threshold(self, mock_drone, mock_queue):
+        monitor = LinkMonitor(mock_drone, mock_queue, min_link_quality_percent=50.0)
         monitor._on_link_quality(80.0)
 
         monitor._run_once()

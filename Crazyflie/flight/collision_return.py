@@ -11,7 +11,7 @@ regardless of whether the interruption happened on the outbound leg, the
 inverting each command yields a path back to the start point.
 
 The return leg is flown through SafeFlightController itself (not blocking
-MotionCommander calls) so it stays interruptible: a second collision during
+MotionControl calls) so it stays interruptible: a second collision during
 the retrace aborts it early. When that happens the response is not to keep
 retracing - it is to back away from the new obstacle for clearance and stop,
 leaving the drone to land wherever MotionCommander's context exit lands it.
@@ -28,10 +28,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cflib.positioning.motion_commander import MotionCommander
-
 from Crazyflie.flight.path_runner import REVERSE_DIRECTION, FlightStep
 from Crazyflie.flight.safe_flight_controller import SafeFlightController
+from Crazyflie.hardware.drone_connection import MotionControl
 
 if TYPE_CHECKING:
     from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
@@ -61,7 +60,7 @@ class CollisionContext:
     flight_log: list[FlightStep]
 
 
-# Callback invoked on a COLLISION event: receives the active MotionCommander,
+# Callback invoked on a COLLISION event: receives the active MotionControl,
 # a CollisionContext describing flight progress, a should_abort callable
 # backed by the (re-armed) CollisionMonitor so a second collision can be
 # detected during the response, the shared FlightState so any further
@@ -71,7 +70,7 @@ class CollisionContext:
 # correction the outbound leg had.
 OnCollisionFn = Callable[
     [
-        MotionCommander,
+        MotionControl,
         CollisionContext,
         Callable[[], bool],
         "FlightState",
@@ -108,7 +107,7 @@ def build_return_path(flight_log: list[FlightStep]) -> list[FlightStep]:
 
 
 def fly_home_after_collision(
-    mc: MotionCommander,
+    mc: MotionControl,
     context: CollisionContext,
     should_abort: Callable[[], bool],
     flight_state: FlightState | None = None,
@@ -123,7 +122,7 @@ def fly_home_after_collision(
     function returns, leaving MotionCommander's context exit to land.
 
     Args:
-        mc: Active MotionCommander instance.
+        mc: Active MotionControl instance.
         context: Flight progress snapshot from the first collision.
         should_abort: Callable checked every poll cycle during the retrace.
             Pass the CollisionMonitor's is_triggered after calling reset()

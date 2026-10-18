@@ -5,8 +5,8 @@ takeoff and returns False if anything is closer than the minimum clearance
 threshold. Call this before starting monitors or taking off.
 
 Example:
-    >>> with SyncCrazyflie(URI) as scf:
-    ...     if not check_preflight_clearance(scf):
+    >>> with connect_cflib(URI) as drone:
+    ...     if not check_preflight_clearance(drone):
     ...         logger.error("Too close to obstacle - aborting.")
     ...         return
 """
@@ -14,9 +14,8 @@ Example:
 import logging
 import time
 
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
+from Crazyflie.hardware.drone_connection import DroneConnection
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ def is_clearance_sufficient(
 
 
 def check_preflight_clearance(
-    scf: SyncCrazyflie,
+    drone: DroneConnection,
     min_clearance_m: float = MIN_PREFLIGHT_CLEARANCE_M,
 ) -> bool:
     """Check all five Multi-ranger directions for sufficient clearance.
@@ -62,13 +61,13 @@ def check_preflight_clearance(
     distances and logs a per-direction report.
 
     Args:
-        scf: Connected SyncCrazyflie instance.
+        drone: Connected drone.
         min_clearance_m: Minimum safe clearance in meters. Defaults to 0.1.
 
     Returns:
         True if all directions have sufficient clearance, False otherwise.
     """
-    with MultiRangerDeck(scf) as ranger:
+    with MultiRangerDeck(drone) as ranger:
         time.sleep(_SENSOR_WARMUP_S)
         readings = ranger.get_readings()
 

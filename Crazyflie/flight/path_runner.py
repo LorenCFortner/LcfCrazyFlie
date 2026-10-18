@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from cflib.positioning.motion_commander import MotionCommander
+from Crazyflie.hardware.drone_connection import MotionControl
 
 REVERSE_DIRECTION: dict[str, str] = {
     "forward": "back",
@@ -43,7 +43,7 @@ class FlightStep:
     """A single movement instruction.
 
     Attributes:
-        command: MotionCommander method name ('forward', 'back', 'left',
+        command: MotionControl method name ('forward', 'back', 'left',
                  'right', 'up', 'down', 'turn_left', 'turn_right').
         distance_m: Distance in meters (or degrees for turns).
         velocity: Movement velocity in m/s. Defaults to 0.5.
@@ -79,13 +79,13 @@ class PathRunner:
 
     def run(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path in order.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             should_abort: Optional callable checked before each step.
                           Return True to stop execution early (e.g. collision).
         """
@@ -96,7 +96,7 @@ class PathRunner:
 
     def run_out_and_back(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path outbound, pivot 180°, then retrace back home.
@@ -106,7 +106,7 @@ class PathRunner:
         because the 180° turn already reverses the drone's heading.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             should_abort: Optional callable checked before each step.
                           Return True to stop execution early (e.g. collision).
         """
@@ -131,7 +131,7 @@ class PathRunner:
 
     def run_reversed(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path in reverse to return home.
@@ -140,7 +140,7 @@ class PathRunner:
         forward↔back, left↔right, up↔down, turn_left↔turn_right.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             should_abort: Optional callable checked before each step.
                           Return True to stop execution early (e.g. collision).
         """
@@ -152,7 +152,7 @@ class PathRunner:
 
     @staticmethod
     def _execute(
-        mc: MotionCommander,
+        mc: MotionControl,
         command: str,
         distance_m: float,
         velocity: float,

@@ -25,8 +25,7 @@ import queue
 import threading
 import time
 
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-
+from Crazyflie.hardware.drone_connection import DroneConnection
 from Crazyflie.telemetry.flight_recorder import FlightRecorder
 
 # Placeholder, not hardware-validated -- pick a real value from observed
@@ -76,7 +75,7 @@ class LinkMonitor:
 
     Example:
         >>> event_queue = queue.Queue()
-        >>> monitor = LinkMonitor(scf, event_queue)
+        >>> monitor = LinkMonitor(drone, event_queue)
         >>> monitor.start()
         >>> # ... flight happens ...
         >>> monitor.stop()
@@ -85,7 +84,7 @@ class LinkMonitor:
 
     def __init__(
         self,
-        scf: SyncCrazyflie,
+        drone: DroneConnection,
         event_queue: queue.Queue[str],
         min_link_quality_percent: float = MIN_LINK_QUALITY_PERCENT,
         recorder: FlightRecorder | None = None,
@@ -93,7 +92,7 @@ class LinkMonitor:
         """Initialize the monitor.
 
         Args:
-            scf: Connected SyncCrazyflie instance.
+            drone: Connected drone.
             event_queue: Queue to post "LOWSIGNAL" messages to.
             min_link_quality_percent: Link quality below which "LOWSIGNAL"
                 is posted.
@@ -103,7 +102,7 @@ class LinkMonitor:
                 genuinely-missing signal trace is distinguishable from one
                 never recorded.
         """
-        self._scf = scf
+        self._drone = drone
         self._event_queue = event_queue
         self._min_link_quality_percent = min_link_quality_percent
         self._recorder = recorder
@@ -129,8 +128,8 @@ class LinkMonitor:
     def start(self) -> None:
         """Register link-statistics callbacks and start the polling thread."""
         self._stop_requested = False
-        self._scf.cf.link_statistics.link_quality_updated.add_callback(self._on_link_quality)
-        self._scf.cf.link_statistics.uplink_rssi_updated.add_callback(self._on_uplink_rssi)
+        self._drone.add_link_quality_callback(self._on_link_quality)
+        self._drone.add_uplink_rssi_callback(self._on_uplink_rssi)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -144,10 +143,8 @@ class LinkMonitor:
         """
         self._stop_requested = True
         try:
-            self._scf.cf.link_statistics.link_quality_updated.remove_callback(
-                self._on_link_quality
-            )
-            self._scf.cf.link_statistics.uplink_rssi_updated.remove_callback(self._on_uplink_rssi)
+            self._drone.remove_link_quality_callback(self._on_link_quality)
+            self._drone.remove_uplink_rssi_callback(self._on_uplink_rssi)
         except ValueError:
             pass
 

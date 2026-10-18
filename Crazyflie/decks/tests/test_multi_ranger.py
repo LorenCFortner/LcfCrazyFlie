@@ -9,55 +9,53 @@ from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
 
 
 @pytest.fixture
-def mock_scf(mocker):
-    return mocker.MagicMock()
+def mock_ranger_cm(mocker):
+    """Context manager returned by drone.open_ranger(), yielding mock_multiranger."""
+    cm = mocker.MagicMock()
+    cm.__enter__.return_value = mocker.MagicMock()
+    cm.__exit__.return_value = False
+    return cm
 
 
 @pytest.fixture
-def mock_multiranger(mocker):
-    mr = mocker.MagicMock()
-    mr.__enter__ = mocker.MagicMock(return_value=mr)
-    mr.__exit__ = mocker.MagicMock(return_value=False)
-    return mr
+def mock_multiranger(mock_ranger_cm):
+    return mock_ranger_cm.__enter__.return_value
 
 
 @pytest.fixture
-def ranger(mock_scf, mock_multiranger, mocker):
-    mocker.patch(
-        "Crazyflie.decks.multi_ranger.Multiranger",
-        return_value=mock_multiranger,
-    )
-    deck = MultiRangerDeck(mock_scf)
+def drone(mock_drone, mock_ranger_cm):
+    mock_drone.open_ranger.return_value = mock_ranger_cm
+    return mock_drone
+
+
+@pytest.fixture
+def ranger(drone, mock_multiranger):
+    deck = MultiRangerDeck(drone)
     deck.__enter__()
     return deck, mock_multiranger
 
 
 class TestContextManager:
-    def test_enter_starts_multiranger(self, mock_scf, mock_multiranger, mocker):
-        mocker.patch("Crazyflie.decks.multi_ranger.Multiranger", return_value=mock_multiranger)
-
-        deck = MultiRangerDeck(mock_scf)
+    def test_enter_opens_the_ranger(self, drone, mock_ranger_cm):
+        deck = MultiRangerDeck(drone)
         deck.__enter__()
 
-        mock_multiranger.__enter__.assert_called_once()
+        drone.open_ranger.assert_called_once_with()
+        mock_ranger_cm.__enter__.assert_called_once()
 
-    def test_exit_stops_multiranger(self, mock_scf, mock_multiranger, mocker):
-        mocker.patch("Crazyflie.decks.multi_ranger.Multiranger", return_value=mock_multiranger)
-
-        deck = MultiRangerDeck(mock_scf)
+    def test_exit_closes_the_ranger(self, drone, mock_ranger_cm):
+        deck = MultiRangerDeck(drone)
         deck.__enter__()
         deck.__exit__(None, None, None)
 
-        mock_multiranger.__exit__.assert_called_once_with(None, None, None)
+        mock_ranger_cm.__exit__.assert_called_once_with(None, None, None)
 
-    def test_exit_clears_internal_reference(self, mock_scf, mock_multiranger, mocker):
-        mocker.patch("Crazyflie.decks.multi_ranger.Multiranger", return_value=mock_multiranger)
-
-        deck = MultiRangerDeck(mock_scf)
+    def test_exit_clears_internal_reference(self, drone):
+        deck = MultiRangerDeck(drone)
         deck.__enter__()
         deck.__exit__(None, None, None)
 
-        assert deck._multiranger is None
+        assert deck._ranger is None
 
 
 class TestDirectionProperties:
@@ -76,8 +74,8 @@ class TestDirectionProperties:
         assert getattr(deck, direction) is None
 
     @pytest.mark.parametrize("direction", ["front", "back", "left", "right", "up"])
-    def test_direction_returns_none_when_not_entered(self, mock_scf, direction):
-        deck = MultiRangerDeck(mock_scf)
+    def test_direction_returns_none_when_not_entered(self, mock_drone, direction):
+        deck = MultiRangerDeck(mock_drone)
 
         assert getattr(deck, direction) is None
 

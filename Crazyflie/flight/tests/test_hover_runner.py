@@ -82,6 +82,23 @@ def test_calls_lifecycle_once_with_uri_and_telemetry_file_and_no_hooks(mocker):
     assert lifecycle.call_args.kwargs.get("hooks") is None
 
 
+def test_supplied_connect_fn_is_passed_to_lifecycle(mocker):
+    lifecycle = capture_lifecycle_call(mocker, _MODULE)
+    connect_fn = mocker.MagicMock()
+
+    run_hover_flight("radio://test", 10.0, connect_fn=connect_fn)
+
+    assert lifecycle.call_args.kwargs["connect_fn"] is connect_fn
+
+
+def test_connect_fn_defaults_to_none_so_lifecycle_uses_connect_cflib(mocker):
+    lifecycle = capture_lifecycle_call(mocker, _MODULE)
+
+    run_hover_flight("radio://test", 10.0)
+
+    assert lifecycle.call_args.kwargs["connect_fn"] is None
+
+
 @pytest.mark.parametrize("duration_s", [0.0, -1.0, 0.5, 3.0, 10.0])
 def test_hovers_for_duration_then_logs_complete(mocker, caplog, duration_s):
     with caplog.at_level(logging.INFO):

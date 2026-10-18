@@ -21,8 +21,6 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-
 from Crazyflie.decks.multi_ranger import MultiRangerReadings
 from Crazyflie.flight.flight_lifecycle import (
     EVENT_WAIT_TIMEOUT_S,
@@ -32,6 +30,7 @@ from Crazyflie.flight.flight_lifecycle import (
     run_flight_lifecycle,
 )
 from Crazyflie.flight.wall_follower import WallFollowConfig, WallFollower
+from Crazyflie.hardware.drone_connection import ConnectFn, DroneConnection
 from Crazyflie.safety.collision_monitor import CollisionMonitor
 
 logger = logging.getLogger(__name__)
@@ -116,8 +115,9 @@ def run_wall_follow_flight(
     uri: str,
     config: WallFollowConfig | None = None,
     telemetry_file: Path | None = None,
-    pre_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
-    post_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
+    pre_flight_fn: Callable[[DroneConnection], None] | None = None,
+    post_flight_fn: Callable[[DroneConnection], None] | None = None,
+    connect_fn: ConnectFn | None = None,
 ) -> None:
     """Execute a right-wall-following flight with full safety architecture.
 
@@ -138,6 +138,8 @@ def run_wall_follow_flight(
             + effect 7 + brightness 31 when None.
         post_flight_fn: Called after landing to clean up (e.g. LED off).
             Defaults to turning off the LED ring when None.
+        connect_fn: Optional factory returning a context manager that yields the
+            DroneConnection to fly. Defaults to connecting over cflib when None.
     """
     cfg = config if config is not None else WallFollowConfig()
 
@@ -194,4 +196,6 @@ def run_wall_follow_flight(
 
     hooks = FlightLifecycleHooks(pre_flight_fn=pre_flight_fn, post_flight_fn=post_flight_fn)
 
-    run_flight_lifecycle(uri, _flight_body, hooks=hooks, telemetry_file=telemetry_file)
+    run_flight_lifecycle(
+        uri, _flight_body, hooks=hooks, telemetry_file=telemetry_file, connect_fn=connect_fn
+    )

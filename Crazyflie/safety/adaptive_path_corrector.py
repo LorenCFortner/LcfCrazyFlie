@@ -17,7 +17,7 @@ v=0 the two formulas coincide (side_threshold(0) == _SIDE_CLEARANCE_M), so
 this reduces to the original fixed (0.10, 0.15) m zone at rest.
 
 The correction is a small yaw turn to angle the drone parallel to the wall,
-or a brief downward nudge for a low ceiling.  The actual MotionCommander call
+or a brief downward nudge for a low ceiling.  The actual MotionControl call
 is issued by SafeFlightController._execute(); this class only sets the flag
 and the correction parameters.
 
@@ -36,9 +36,8 @@ import logging
 import threading
 import time
 
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
+from Crazyflie.hardware.drone_connection import DroneConnection
 from Crazyflie.safety.collision_monitor import (
     _FLIGHT_DIR_TO_SENSORS,
     _REACTION_S,
@@ -61,7 +60,7 @@ ADAPTIVE_VERT_NUDGE_M: float = 0.08  # vertical correction for up-sensor (meters
 ADAPTIVE_VERT_VELOCITY: float = 0.30  # vertical correction speed (m/s)
 ADAPTIVE_COOLDOWN_S: float = 1.0  # minimum seconds between corrections
 
-# Maps (flight_direction, close_sensor) → MotionCommander turn command.
+# Maps (flight_direction, close_sensor) → MotionControl turn command.
 # Goal: turn the drone so it runs parallel to the wall (angles away from it).
 _SIDE_CORRECTION: dict[tuple[str, str], str] = {
     ("forward", "right"): "turn_left",
@@ -80,10 +79,10 @@ class AdaptivePathCorrector:
 
     Run in a background thread via start()/stop().  The correction flag is
     consumed by SafeFlightController._execute() which issues the actual
-    MotionCommander call.
+    MotionControl call.
 
     Example:
-        >>> corrector = AdaptivePathCorrector(scf, flight_state)
+        >>> corrector = AdaptivePathCorrector(drone, flight_state)
         >>> corrector.start()
         >>> # In flight loop:
         >>> if corrector.needs_correction():
@@ -96,14 +95,14 @@ class AdaptivePathCorrector:
         >>> corrector.join()
     """
 
-    def __init__(self, scf: SyncCrazyflie, flight_state: FlightState) -> None:
+    def __init__(self, drone: DroneConnection, flight_state: FlightState) -> None:
         """Initialize the corrector.
 
         Args:
-            scf: Connected SyncCrazyflie instance (passed to MultiRangerDeck).
+            drone: Connected drone (passed to MultiRangerDeck).
             flight_state: Shared flight state providing current direction.
         """
-        self._scf = scf
+        self._drone = drone
         self._flight_state = flight_state
         self._correction: tuple[str, float] | None = None
         self._correcting = threading.Event()
@@ -193,7 +192,7 @@ class AdaptivePathCorrector:
         """Background thread: polls Multi-ranger and sets correction flag."""
         from Crazyflie.safety.collision_monitor import _POLL_INTERVAL_S
 
-        with MultiRangerDeck(self._scf) as ranger:
+        with MultiRangerDeck(self._drone) as ranger:
             while not self._stop_requested:
                 readings = ranger.get_readings()
                 self._check(readings)

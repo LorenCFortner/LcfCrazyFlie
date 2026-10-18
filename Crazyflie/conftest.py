@@ -2,19 +2,19 @@
 
 import pytest
 
+from Crazyflie.hardware.drone_connection import DroneConnection, MotionControl
+
 
 @pytest.fixture
-def mock_scf(mocker):
-    """Mock SyncCrazyflie with a fully stubbed cf layer."""
-    scf = mocker.MagicMock()
-    scf.cf.param.set_value = mocker.MagicMock()
-    return scf
+def mock_drone(mocker):
+    """Mock DroneConnection - the project-owned hardware boundary."""
+    return mocker.MagicMock(spec=DroneConnection)
 
 
 @pytest.fixture
 def mock_mc(mocker):
-    """Mock MotionCommander with all movement methods stubbed."""
-    return mocker.MagicMock()
+    """Mock MotionControl with all movement methods stubbed."""
+    return mocker.MagicMock(spec=MotionControl)
 
 
 @pytest.fixture

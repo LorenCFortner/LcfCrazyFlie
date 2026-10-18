@@ -87,26 +87,36 @@ def mock_ranger(mocker):
 
 
 @pytest.fixture
-def patched_clearance(mock_scf, mock_ranger, mocker):
+def patched_clearance(mock_drone, mock_ranger, mocker):
     mocker.patch(
         "Crazyflie.safety.clearance_check.MultiRangerDeck",
         return_value=mock_ranger,
     )
     mocker.patch("Crazyflie.safety.clearance_check.time.sleep")
-    return mock_scf, mock_ranger
+    return mock_drone, mock_ranger
 
 
 class TestCheckPreflightClearance:
+    def test_opens_the_ranger_deck_on_the_given_drone(self, mock_drone, mock_ranger, mocker):
+        deck_cls = mocker.patch(
+            "Crazyflie.safety.clearance_check.MultiRangerDeck", return_value=mock_ranger
+        )
+        mocker.patch("Crazyflie.safety.clearance_check.time.sleep")
+
+        check_preflight_clearance(mock_drone)
+
+        deck_cls.assert_called_once_with(mock_drone)
+
     def test_returns_true_when_all_clear(self, patched_clearance):
-        scf, _ = patched_clearance
-        assert check_preflight_clearance(scf) is True
+        drone, _ = patched_clearance
+        assert check_preflight_clearance(drone) is True
 
     def test_returns_false_when_front_too_close(self, patched_clearance):
-        scf, ranger = patched_clearance
+        drone, ranger = patched_clearance
         ranger.get_readings.return_value = _readings(
             front=0.05, back=1.0, left=1.0, right=1.0, up=1.0
         )
-        assert check_preflight_clearance(scf) is False
+        assert check_preflight_clearance(drone) is False
 
     @pytest.mark.parametrize(
         "direction,kwargs",
@@ -125,19 +135,19 @@ class TestCheckPreflightClearance:
         ],
     )
     def test_returns_false_for_each_blocked_direction(self, patched_clearance, direction, kwargs):
-        scf, ranger = patched_clearance
+        drone, ranger = patched_clearance
         ranger.get_readings.return_value = _readings(**kwargs)
-        assert check_preflight_clearance(scf) is False
+        assert check_preflight_clearance(drone) is False
 
     def test_sleeps_for_sensor_warmup(self, patched_clearance, mocker):
-        scf, _ = patched_clearance
+        drone, _ = patched_clearance
         mock_sleep = mocker.patch("Crazyflie.safety.clearance_check.time.sleep")
-        check_preflight_clearance(scf)
+        check_preflight_clearance(drone)
         mock_sleep.assert_called_once()
 
     def test_uses_default_min_clearance(self, patched_clearance, mocker):
-        scf, ranger = patched_clearance
-        check_preflight_clearance(scf)
+        drone, ranger = patched_clearance
+        check_preflight_clearance(drone)
         # default threshold - a reading just above it should still pass
         ranger.get_readings.return_value = _readings(
             front=MIN_PREFLIGHT_CLEARANCE_M + 0.01,
@@ -146,28 +156,28 @@ class TestCheckPreflightClearance:
             right=1.0,
             up=1.0,
         )
-        assert check_preflight_clearance(scf) is True
+        assert check_preflight_clearance(drone) is True
 
     def test_custom_threshold_passed_through(self, patched_clearance):
-        scf, ranger = patched_clearance
+        drone, ranger = patched_clearance
         # 0.5 m front obstacle - clear at 0.3 default, blocked at 0.6
         ranger.get_readings.return_value = _readings(
             front=0.5, back=1.0, left=1.0, right=1.0, up=1.0
         )
-        assert check_preflight_clearance(scf, min_clearance_m=0.3) is True
-        assert check_preflight_clearance(scf, min_clearance_m=0.6) is False
+        assert check_preflight_clearance(drone, min_clearance_m=0.3) is True
+        assert check_preflight_clearance(drone, min_clearance_m=0.6) is False
 
     def test_blocked_direction_logged_at_warning_level(
         self, patched_clearance, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
-        scf, ranger = patched_clearance
+        drone, ranger = patched_clearance
         ranger.get_readings.return_value = _readings(
             front=0.05, back=1.0, left=1.0, right=1.0, up=1.0
         )
         with caplog.at_level(logging.WARNING, logger="Crazyflie.safety.clearance_check"):
-            check_preflight_clearance(scf)
+            check_preflight_clearance(drone)
 
         warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any("front" in m and "BLOCKED" in m for m in warning_messages)
@@ -177,12 +187,12 @@ class TestCheckPreflightClearance:
     ) -> None:
         import logging
 
-        scf, ranger = patched_clearance
+        drone, ranger = patched_clearance
         ranger.get_readings.return_value = _readings(
             front=1.0, back=1.0, left=1.0, right=1.0, up=1.0
         )
         with caplog.at_level(logging.WARNING, logger="Crazyflie.safety.clearance_check"):
-            check_preflight_clearance(scf)
+            check_preflight_clearance(drone)
 
         warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert not warning_messages
@@ -192,12 +202,12 @@ class TestCheckPreflightClearance:
     ) -> None:
         import logging
 
-        scf, ranger = patched_clearance
+        drone, ranger = patched_clearance
         ranger.get_readings.return_value = _readings(
             front=0.05, back=1.0, left=0.07, right=1.0, up=1.0
         )
         with caplog.at_level(logging.WARNING, logger="Crazyflie.safety.clearance_check"):
-            check_preflight_clearance(scf)
+            check_preflight_clearance(drone)
 
         warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any("front" in m and "BLOCKED" in m for m in warning_messages)

@@ -64,9 +64,9 @@ new wall. Two independent protections address this:
 Example:
     >>> event_queue = queue.Queue()
     >>> state = FlightState()
-    >>> monitor = CollisionMonitor(scf, event_queue, flight_state=state)
+    >>> monitor = CollisionMonitor(drone, event_queue, flight_state=state)
     >>> monitor.start()
-    >>> with MotionCommander(scf) as mc:
+    >>> with drone.motion_commander() as mc:
     ...     monitor.attach_motion_commander(mc)
     ...     controller.run_out_and_back(mc, should_abort=monitor.is_triggered)
     ...     monitor.detach_motion_commander()
@@ -82,10 +82,8 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-from cflib.positioning.motion_commander import MotionCommander
-
 from Crazyflie.decks.multi_ranger import MultiRangerDeck, MultiRangerReadings
+from Crazyflie.hardware.drone_connection import DroneConnection, MotionControl
 from Crazyflie.state.flight_state import FlightState
 from Crazyflie.telemetry.flight_recorder import FlightRecorder
 
@@ -209,7 +207,7 @@ def find_avoidance_move(
     dynamic_threshold: float,
     side_threshold: float = _SIDE_CLEARANCE_M,
 ) -> str | None:
-    """Return the MotionCommander method to move away from the nearest obstacle.
+    """Return the MotionControl method to move away from the nearest obstacle.
 
     Checks sensors in priority order (front, back, left, right, up).
     The sensor(s) corresponding to ``flight_direction`` (see
@@ -234,7 +232,7 @@ def find_avoidance_move(
             stopping room on the sides while translating.
 
     Returns:
-        MotionCommander method name ('back', 'forward', 'right', 'left', 'down'),
+        MotionControl method name ('back', 'forward', 'right', 'left', 'down'),
         or None if no sensor is below its threshold.
     """
     active_sensors = _FLIGHT_DIR_TO_SENSORS.get(flight_direction or "", ())
@@ -309,7 +307,7 @@ class CollisionMonitor:
 
     Runs in a background thread. When any sensor reads closer than the
     velocity-dependent threshold, the monitor immediately calls mc.stop()
-    (if a MotionCommander is attached) and posts "COLLISION" to the event queue.
+    (if a MotionControl is attached) and posts "COLLISION" to the event queue.
 
     Detection threshold formula (when FlightState is provided):
         threshold = max(_BASE_DETECTION_M, velocity * _REACTION_S)
@@ -329,7 +327,7 @@ class CollisionMonitor:
 
     def __init__(
         self,
-        scf: SyncCrazyflie,
+        drone: DroneConnection,
         event_queue: queue.Queue[str],
         min_distance_m: float = DEFAULT_MIN_DISTANCE_M,
         flight_state: FlightState | None = None,
@@ -339,7 +337,7 @@ class CollisionMonitor:
         """Initialize the collision monitor.
 
         Args:
-            scf: Connected SyncCrazyflie instance.
+            drone: Connected drone.
             event_queue: Queue to post "COLLISION" messages to.
             min_distance_m: Static threshold in meters. Used only when
                 flight_state is None. Ignored when flight_state is provided.
@@ -352,11 +350,11 @@ class CollisionMonitor:
             recorder: Optional FlightRecorder. When provided, every Multi-ranger
                 reading is written to its telemetry CSV - not just trigger/warn
                 events - including the pre-stop trigger reading, and (only when
-                a MotionCommander is attached, since only then does a stop and
+                a MotionControl is attached, since only then does a stop and
                 avoidance move actually happen) the fresh post-stop reading
                 used to compute the avoidance move.
         """
-        self._scf = scf
+        self._drone = drone
         self._event_queue = event_queue
         self._min_distance_m = min_distance_m
         self._flight_state = flight_state
@@ -364,7 +362,7 @@ class CollisionMonitor:
         self._recorder = recorder
         self._stop_requested = False
         self._triggered = False
-        self._mc: MotionCommander | None = None
+        self._mc: MotionControl | None = None
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._readings_lock = threading.Lock()
@@ -378,19 +376,19 @@ class CollisionMonitor:
         self._last_raw_readings: MultiRangerReadings | None = None
         self._frozen_since: float | None = None
 
-    def attach_motion_commander(self, mc: MotionCommander) -> None:
-        """Attach a MotionCommander so movement stops immediately on collision.
+    def attach_motion_commander(self, mc: MotionControl) -> None:
+        """Attach a MotionControl so movement stops immediately on collision.
 
-        Call this after entering the MotionCommander context, before flight.
+        Call this after entering the motion-control context, before flight.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
         """
         with self._lock:
             self._mc = mc
 
     def detach_motion_commander(self) -> None:
-        """Detach the MotionCommander before it exits its context."""
+        """Detach the MotionControl before it exits its context."""
         with self._lock:
             self._mc = None
 
@@ -910,7 +908,7 @@ class CollisionMonitor:
         When FlightState is provided, uses per-sensor directional logic via
         ranger.get_readings() and find_avoidance_move.
         """
-        with MultiRangerDeck(self._scf) as ranger:
+        with MultiRangerDeck(self._drone) as ranger:
             if self._triggered:
                 return
             readings = ranger.get_readings()
@@ -944,7 +942,7 @@ class CollisionMonitor:
         When FlightState is provided, uses per-sensor directional logic via
         ranger.get_readings() and find_avoidance_move.
         """
-        with MultiRangerDeck(self._scf) as ranger:
+        with MultiRangerDeck(self._drone) as ranger:
             while not self._stop_requested:
                 readings = ranger.get_readings()
                 self._update_latest_readings(readings)

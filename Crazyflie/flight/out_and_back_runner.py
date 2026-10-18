@@ -19,8 +19,6 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-
 from Crazyflie.flight.collision_return import OnCollisionFn
 from Crazyflie.flight.flight_lifecycle import (
     EVENT_WAIT_TIMEOUT_S,
@@ -31,6 +29,7 @@ from Crazyflie.flight.flight_lifecycle import (
 )
 from Crazyflie.flight.path_runner import FlightStep
 from Crazyflie.flight.safe_flight_controller import SafeFlightController
+from Crazyflie.hardware.drone_connection import ConnectFn, DroneConnection
 from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
 from Crazyflie.state.flight_state import FlightState
 
@@ -41,10 +40,11 @@ def run_out_and_back_flight(
     path: list[FlightStep],
     uri: str,
     description: str,
-    pre_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
-    post_flight_fn: Callable[[SyncCrazyflie], None] | None = None,
+    pre_flight_fn: Callable[[DroneConnection], None] | None = None,
+    post_flight_fn: Callable[[DroneConnection], None] | None = None,
     on_collision_fn: OnCollisionFn | None = None,
     telemetry_file: Path | None = None,
+    connect_fn: ConnectFn | None = None,
 ) -> None:
     """Execute a path out-and-back flight with full safety architecture.
 
@@ -65,7 +65,7 @@ def run_out_and_back_flight(
         post_flight_fn: Called after landing to clean up (e.g. LED off).
             Defaults to turning off the LED ring when None.
         on_collision_fn: Called on a COLLISION event instead of mc.land().
-            Receives the MotionCommander, a CollisionContext describing
+            Receives the MotionControl, a CollisionContext describing
             flight progress, a should_abort callable for detecting a second
             collision during the response, the shared FlightState, and the
             shared AdaptivePathCorrector. Defaults to mc.land() when None.
@@ -73,12 +73,14 @@ def run_out_and_back_flight(
             (every Multi-ranger reading and stabilizer sample, not just
             WARNING-level events) to as CSV. When None, no telemetry is
             recorded.
+        connect_fn: Optional factory returning a context manager that yields the
+            DroneConnection to fly. Defaults to connecting over cflib when None.
     """
 
     def _make_adaptive_corrector(
-        scf: SyncCrazyflie, flight_state: FlightState
+        drone: DroneConnection, flight_state: FlightState
     ) -> AdaptivePathCorrector:
-        return AdaptivePathCorrector(scf, flight_state)
+        return AdaptivePathCorrector(drone, flight_state)
 
     def _flight_body(ctx: FlightContext) -> None:
         controller = SafeFlightController(
@@ -123,4 +125,6 @@ def run_out_and_back_flight(
         make_adaptive_corrector=_make_adaptive_corrector,
     )
 
-    run_flight_lifecycle(uri, _flight_body, hooks=hooks, telemetry_file=telemetry_file)
+    run_flight_lifecycle(
+        uri, _flight_body, hooks=hooks, telemetry_file=telemetry_file, connect_fn=connect_fn
+    )

@@ -20,9 +20,7 @@ import queue
 import time
 from pathlib import Path
 
-import cflib.crtp
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-
+from Crazyflie.hardware.cflib_connection import connect_cflib
 from Crazyflie.observability.run_logging import configure_run_logging
 from Crazyflie.telemetry.stabilizer_monitor import StabilizerMonitor
 
@@ -50,16 +48,14 @@ def main() -> None:
     configure_run_logging(__name__, _LOG_FILE)
     logger.info(f"Writing full run log to {_LOG_FILE}")
 
-    cflib.crtp.init_drivers(enable_debug_driver=False)
-
     logger.info(f"Connecting to {URI}...")
     logger.info("Streaming stabilizer telemetry (no flight) - press Ctrl+C to stop.")
 
     event_queue: queue.Queue[str] = queue.Queue()
 
     try:
-        with SyncCrazyflie(URI) as scf:
-            monitor = StabilizerMonitor(scf, event_queue)
+        with connect_cflib(URI) as drone:
+            monitor = StabilizerMonitor(drone, event_queue)
             monitor.start()
             try:
                 if not monitor.wait_for_first_reading(timeout_s=5.0):
@@ -83,7 +79,7 @@ def main() -> None:
                     )
                     time.sleep(POLL_INTERVAL_S)
             finally:
-                # Stop and join before the `with SyncCrazyflie` block
+                # Stop and join before the `connect_cflib` block
                 # disconnects, so the log config is cleaned up while the
                 # link is still open -- see CollisionMonitor.join()'s
                 # docstring for why this ordering matters.

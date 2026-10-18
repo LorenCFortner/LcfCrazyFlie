@@ -17,16 +17,15 @@ import logging
 import queue
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
-
-import cflib.crtp
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-from cflib.positioning.motion_commander import MotionCommander
 
 from Crazyflie.decks.led_ring import LedRingDeck
 from Crazyflie.flight.collision_return import CollisionContext, OnCollisionFn
 from Crazyflie.flight.safe_flight_controller import SafeFlightController
+from Crazyflie.hardware.cflib_connection import connect_cflib
+from Crazyflie.hardware.drone_connection import ConnectFn, DroneConnection, MotionControl
 from Crazyflie.safety.adaptive_path_corrector import AdaptivePathCorrector
 from Crazyflie.safety.clearance_check import check_preflight_clearance
 from Crazyflie.safety.collision_monitor import CollisionMonitor
@@ -57,24 +56,24 @@ def _never_abort() -> bool:
     return False
 
 
-def _default_pre_flight(scf: SyncCrazyflie) -> None:
+def _default_pre_flight(drone: DroneConnection) -> None:
     """Arm the LED ring before takeoff.
 
     Args:
-        scf: Connected SyncCrazyflie instance.
+        drone: Connected drone.
     """
-    LedRingDeck.headlights_on(scf)
-    LedRingDeck.set_effect(scf, 7)
-    LedRingDeck.set_brightness(scf, 31)
+    LedRingDeck.headlights_on(drone)
+    LedRingDeck.set_effect(drone, 7)
+    LedRingDeck.set_brightness(drone, 31)
 
 
-def _default_post_flight(scf: SyncCrazyflie) -> None:
+def _default_post_flight(drone: DroneConnection) -> None:
     """Turn off LEDs after landing.
 
     Args:
-        scf: Connected SyncCrazyflie instance.
+        drone: Connected drone.
     """
-    LedRingDeck.turn_off(scf)
+    LedRingDeck.turn_off(drone)
 
 
 @dataclass
@@ -88,7 +87,7 @@ class FlightLifecycleHooks:
         post_flight_fn: Called after landing to clean up (e.g. LED off).
             Defaults to turning off the LED ring when None.
         make_adaptive_corrector: Optional factory invoked with the connected
-            SyncCrazyflie and the shared FlightState once both exist, to
+            DroneConnection and the shared FlightState once both exist, to
             construct an AdaptivePathCorrector for runners that use one (path
             flights, for straight-line drift correction). Left None for
             flight modes that don't need it (e.g. wall-following, whose own
@@ -97,10 +96,10 @@ class FlightLifecycleHooks:
             case.
     """
 
-    pre_flight_fn: Callable[[SyncCrazyflie], None] | None = None
-    post_flight_fn: Callable[[SyncCrazyflie], None] | None = None
+    pre_flight_fn: Callable[[DroneConnection], None] | None = None
+    post_flight_fn: Callable[[DroneConnection], None] | None = None
     make_adaptive_corrector: (
-        Callable[[SyncCrazyflie, FlightState], AdaptivePathCorrector] | None
+        Callable[[DroneConnection, FlightState], AdaptivePathCorrector] | None
     ) = None
 
 
@@ -118,7 +117,7 @@ class FlightContext:
     everything it needs.
 
     Attributes:
-        mc: Active MotionCommander instance.
+        mc: Active MotionControl instance.
         flight_state: Shared FlightState written by whichever component is
             actively commanding motion (SafeFlightController, WallFollower).
         event_queue: Queue receiving CRASH / BATLOW / LOWSIGNAL / COLLISION
@@ -133,7 +132,7 @@ class FlightContext:
             triggered.
     """
 
-    mc: MotionCommander
+    mc: MotionControl
     flight_state: FlightState
     event_queue: queue.Queue[str]
     stabilizer_monitor: StabilizerMonitor
@@ -147,7 +146,7 @@ FlightBodyFn = Callable[[FlightContext], None]
 
 def handle_safety_events(
     event_queue: queue.Queue[str],
-    mc: MotionCommander,
+    mc: MotionControl,
     stabilizer_monitor: StabilizerMonitor,
     controller: SafeFlightController | None = None,
     collision_monitor: CollisionMonitor | None = None,
@@ -178,7 +177,7 @@ def handle_safety_events(
     Args:
         event_queue: Queue receiving CRASH / BATLOW / LOWSIGNAL / COLLISION
             messages.
-        mc: Active MotionCommander instance.
+        mc: Active MotionControl instance.
         stabilizer_monitor: Running StabilizerMonitor (stopped on event).
         controller: SafeFlightController whose flight_log describes progress
             so far. Required (alongside on_collision_fn) to build a
@@ -189,7 +188,7 @@ def handle_safety_events(
             response is detectable via its is_triggered method. Without it,
             on_collision_fn receives an always-False should_abort.
         on_collision_fn: Optional callable invoked on COLLISION instead of
-            mc.land(). Receives the MotionCommander, a CollisionContext, a
+            mc.land(). Receives the MotionControl, a CollisionContext, a
             should_abort callable, the shared FlightState, and the shared
             AdaptivePathCorrector.
         flight_state: Shared FlightState passed through to on_collision_fn
@@ -263,6 +262,7 @@ def run_flight_lifecycle(
     flight_body_fn: FlightBodyFn,
     hooks: FlightLifecycleHooks | None = None,
     telemetry_file: Path | None = None,
+    connect_fn: ConnectFn | None = None,
 ) -> None:
     """Execute a flight's full connect-to-landing lifecycle.
 
@@ -274,7 +274,7 @@ def run_flight_lifecycle(
     Args:
         uri: Radio or USB URI to connect to.
         flight_body_fn: Called once takeoff is verified, with a FlightContext
-            bundling the MotionCommander, shared FlightState, event queue,
+            bundling the MotionControl, shared FlightState, event queue,
             and running monitors. Responsible for flying, for its own
             should_abort() check afterward (calling handle_safety_events()
             itself if it fires), and for any flight-specific logging.
@@ -285,32 +285,37 @@ def run_flight_lifecycle(
             (every Multi-ranger reading, stabilizer sample, and link-quality
             sample, not just WARNING-level events) to as CSV. When None, no
             telemetry is recorded.
+        connect_fn: Optional factory returning a context manager that yields the
+            DroneConnection to fly. Defaults to connect_cflib(uri) when None, so a
+            different (e.g. simulated) drone can be plugged in.
     """
     _hooks = hooks if hooks is not None else FlightLifecycleHooks()
     _pre = _hooks.pre_flight_fn if _hooks.pre_flight_fn is not None else _default_pre_flight
     _post = _hooks.post_flight_fn if _hooks.post_flight_fn is not None else _default_post_flight
 
-    cflib.crtp.init_drivers(enable_debug_driver=False)
+    def _default_connect() -> AbstractContextManager[DroneConnection]:
+        return connect_cflib(uri)
+
+    _connect = connect_fn if connect_fn is not None else _default_connect
 
     event_queue: queue.Queue[str] = queue.Queue()
     flight_state = FlightState()
 
     logger.info(f"Connecting to {uri}...")
 
-    with SyncCrazyflie(uri) as scf:
+    with _connect() as drone:
         logger.info("Connected.")
-        scf.cf.commander.send_stop_setpoint()
-        scf.cf.commander.send_notify_setpoint_stop()
-        scf.cf.platform.send_arming_request(True)
+        drone.stop_setpoints()
+        drone.arm()
         time.sleep(0.1)
 
         logger.info("Checking pre-flight clearance...")
-        if not check_preflight_clearance(scf):
+        if not check_preflight_clearance(drone):
             logger.error("Pre-flight clearance check FAILED - too close to an obstacle. Aborting.")
             return
         logger.info("Clearance OK.")
 
-        _pre(scf)
+        _pre(drone)
 
         recorder: FlightRecorder | None = None
         if telemetry_file is not None:
@@ -321,22 +326,22 @@ def run_flight_lifecycle(
                 # Telemetry is a diagnostic nice-to-have, not a safety
                 # feature - a failure here must never abort a flight that's
                 # already armed, or skip the try/finally cleanup below by
-                # propagating out of this `with SyncCrazyflie` block.
+                # propagating out of this `with _connect()` block.
                 logger.error(f"Failed to start telemetry recording to {telemetry_file}: {exc}")
                 recorder = None
 
-        stabilizer_monitor = StabilizerMonitor(scf, event_queue, recorder=recorder)
+        stabilizer_monitor = StabilizerMonitor(drone, event_queue, recorder=recorder)
         stabilizer_monitor.start()
 
-        link_monitor = LinkMonitor(scf, event_queue, recorder=recorder)
+        link_monitor = LinkMonitor(drone, event_queue, recorder=recorder)
         link_monitor.start()
 
         adaptive_corrector: AdaptivePathCorrector | None = None
         if _hooks.make_adaptive_corrector is not None:
-            adaptive_corrector = _hooks.make_adaptive_corrector(scf, flight_state)
+            adaptive_corrector = _hooks.make_adaptive_corrector(drone, flight_state)
 
         collision_monitor = CollisionMonitor(
-            scf,
+            drone,
             event_queue,
             flight_state=flight_state,
             adaptive_corrector=adaptive_corrector,
@@ -358,7 +363,7 @@ def run_flight_lifecycle(
             )
 
         try:
-            with MotionCommander(scf) as mc:
+            with drone.motion_commander() as mc:
                 # Start collision monitoring (and any adaptive corrector)
                 # only once airborne - clearance check already guards
                 # pre-takeoff proximity, and ground-level sensor readings
@@ -414,12 +419,11 @@ def run_flight_lifecycle(
             if recorder is not None:
                 recorder.stop()
             try:
-                _post(scf)
+                _post(drone)
             except Exception:
                 pass
             try:
-                scf.cf.commander.send_stop_setpoint()
-                scf.cf.commander.send_notify_setpoint_stop()
+                drone.stop_setpoints()
             except Exception:
                 pass
             logger.info(f"Total flight time: {flight_time:.1f} s")

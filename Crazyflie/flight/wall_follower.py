@@ -150,7 +150,7 @@ opening a second one (unsafe - see CollisionMonitor.get_latest_readings).
 
 Example:
     >>> follower = WallFollower(WallFollowConfig(), flight_state=flight_state)
-    >>> with MultiRangerDeck(scf) as ranger:  # or any other RangerSource
+    >>> with MultiRangerDeck(drone) as ranger:  # or any other RangerSource
     ...     if follower.fly_to_first_obstacle(mc, ranger, should_abort):
     ...         follower.align_to_wall(mc, ranger)
     ...         follower.follow(mc, ranger, should_abort)
@@ -165,9 +165,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from cflib.positioning.motion_commander import MotionCommander
-
 from Crazyflie.decks.multi_ranger import MAX_RANGE_M, MultiRangerReadings
+from Crazyflie.hardware.drone_connection import MotionControl
 from Crazyflie.safety.collision_monitor import _BASE_DETECTION_M, _REACTION_S
 from Crazyflie.state.flight_state import FlightState
 
@@ -354,10 +353,10 @@ class WallFollower:
     """Closed-loop right-wall-following control.
 
     compute_follow_command() is a pure function of (front, right) plus
-    config -- no MotionCommander, thread, sleep, or drone reference -- so
+    config -- no MotionControl, thread, sleep, or drone reference -- so
     the control law itself is fully unit-testable. fly_to_first_obstacle(),
     align_to_wall() and follow() are the thin I/O wrappers that drive a real
-    (or mocked) MotionCommander and RangerSource from it.
+    (or mocked) MotionControl and RangerSource from it.
     """
 
     def __init__(
@@ -547,14 +546,14 @@ class WallFollower:
 
     def fly_to_first_obstacle(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         ranger: RangerSource,
         should_abort: Callable[[], bool] | None = None,
     ) -> bool:
         """Fly forward until the front sensor reaches target_wall_distance_m.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             ranger: RangerSource to poll (MultiRangerDeck or an equivalent adapter).
             should_abort: Optional callable checked every poll cycle.
                 Returning True stops the search early (e.g. a safety event).
@@ -586,7 +585,7 @@ class WallFollower:
         mc.stop()
         return found
 
-    def align_to_wall(self, mc: MotionCommander, ranger: RangerSource) -> bool:
+    def align_to_wall(self, mc: MotionControl, ranger: RangerSource) -> bool:
         """Rotate left (CCW) in small steps until front and right read equal.
 
         Clears FlightState direction/velocity to None/0.0 for the duration
@@ -610,7 +609,7 @@ class WallFollower:
         to take over safely.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             ranger: RangerSource to poll (MultiRangerDeck or an equivalent adapter).
 
         Returns:
@@ -644,7 +643,7 @@ class WallFollower:
 
     def _rotate_perpendicular_to_wall(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         ranger: RangerSource,
         should_abort: Callable[[], bool] | None,
     ) -> bool:
@@ -660,7 +659,7 @@ class WallFollower:
         Never calls mc.stop() -- follow() alone owns that single call.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             ranger: RangerSource to poll (MultiRangerDeck or an equivalent adapter).
             should_abort: Optional callable checked before turning.
 
@@ -715,7 +714,7 @@ class WallFollower:
 
     def _corner_negotiation_move(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         should_abort: Callable[[], bool] | None,
         vx: float,
         yaw_rate_deg_s: float,
@@ -729,7 +728,7 @@ class WallFollower:
         issued and the loop sleeps for one poll interval.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             should_abort: Optional callable re-checked before the command.
             vx: Forward velocity in m/s to command.
             yaw_rate_deg_s: Yaw rate in deg/s to command alongside vx.
@@ -746,7 +745,7 @@ class WallFollower:
 
     def _advance_past_corner_apex(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         ranger: RangerSource,
         should_abort: Callable[[], bool] | None,
         baseline_right: float | None,
@@ -767,7 +766,7 @@ class WallFollower:
         Never calls mc.stop() -- follow() alone owns that single call.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             ranger: RangerSource to poll (MultiRangerDeck or an equivalent adapter).
             should_abort: Optional callable checked before every motion
                 command.
@@ -804,7 +803,7 @@ class WallFollower:
 
     def _arc_around_corner(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         ranger: RangerSource,
         should_abort: Callable[[], bool] | None,
     ) -> bool:
@@ -824,7 +823,7 @@ class WallFollower:
         Never calls mc.stop() -- follow() alone owns that single call.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             ranger: RangerSource to poll (MultiRangerDeck or an equivalent adapter).
             should_abort: Optional callable checked before every motion
                 command.
@@ -862,7 +861,7 @@ class WallFollower:
 
     def _negotiate_outer_corner(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         ranger: RangerSource,
         should_abort: Callable[[], bool] | None,
         baseline_right: float | None,
@@ -871,7 +870,7 @@ class WallFollower:
         phase 4 is simply returning control to follow()'s own loop).
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             ranger: RangerSource to poll (MultiRangerDeck or an equivalent adapter).
             should_abort: Optional callable checked throughout every phase.
             baseline_right: The right reading from just before the maneuver
@@ -891,7 +890,7 @@ class WallFollower:
 
     def follow(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         ranger: RangerSource,
         should_abort: Callable[[], bool] | None = None,
     ) -> None:
@@ -912,7 +911,7 @@ class WallFollower:
         override the stop.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             ranger: RangerSource to poll (MultiRangerDeck or an equivalent adapter).
             should_abort: Optional callable checked before every motion
                 command. Returning True ends the loop immediately.

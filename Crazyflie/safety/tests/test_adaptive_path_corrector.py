@@ -30,11 +30,6 @@ def _readings(front=None, back=None, left=None, right=None, up=None) -> MultiRan
 
 
 @pytest.fixture
-def mock_scf(mocker):
-    return mocker.MagicMock()
-
-
-@pytest.fixture
 def mock_flight_state(mocker):
     state = mocker.MagicMock()
     state.get_direction.return_value = "forward"
@@ -43,8 +38,8 @@ def mock_flight_state(mocker):
 
 
 @pytest.fixture
-def corrector(mock_scf, mock_flight_state):
-    return AdaptivePathCorrector(mock_scf, mock_flight_state)
+def corrector(mock_drone, mock_flight_state):
+    return AdaptivePathCorrector(mock_drone, mock_flight_state)
 
 
 # ---------------------------------------------------------------------------
@@ -254,3 +249,14 @@ class TestCorrectionState:
         assert corrector.is_correcting()
         corrector.end_correction()
         assert not corrector.is_correcting()
+
+
+class TestRun:
+    def test_opens_the_ranger_deck_on_the_given_drone(self, mock_drone, mock_flight_state, mocker):
+        deck_cls = mocker.patch("Crazyflie.safety.adaptive_path_corrector.MultiRangerDeck")
+        corrector = AdaptivePathCorrector(mock_drone, mock_flight_state)
+        corrector._stop_requested = True
+
+        corrector._run()
+
+        deck_cls.assert_called_once_with(mock_drone)

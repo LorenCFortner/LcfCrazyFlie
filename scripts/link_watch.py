@@ -13,9 +13,7 @@ import logging
 import time
 from pathlib import Path
 
-import cflib.crtp
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-
+from Crazyflie.hardware.cflib_connection import connect_cflib
 from Crazyflie.observability.run_logging import configure_run_logging
 
 URI = "radio://0/1/250K"
@@ -37,8 +35,6 @@ def main() -> None:
     configure_run_logging(__name__, _LOG_FILE)
     logger.info(f"Writing full run log to {_LOG_FILE}")
 
-    cflib.crtp.init_drivers(enable_debug_driver=False)
-
     logger.info(f"Connecting to {URI}...")
     logger.info("Streaming link quality and RSSI - press Ctrl+C to stop.")
 
@@ -49,9 +45,9 @@ def main() -> None:
         logger.info(f"uplink_rssi={rssi:.1f}")
 
     try:
-        with SyncCrazyflie(URI) as scf:
-            scf.cf.link_statistics.link_quality_updated.add_callback(on_link_quality)
-            scf.cf.link_statistics.uplink_rssi_updated.add_callback(on_uplink_rssi)
+        with connect_cflib(URI) as drone:
+            drone.add_link_quality_callback(on_link_quality)
+            drone.add_uplink_rssi_callback(on_uplink_rssi)
             while True:
                 time.sleep(0.5)
     except KeyboardInterrupt:

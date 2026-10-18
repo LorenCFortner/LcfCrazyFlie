@@ -184,6 +184,23 @@ class TestLifecycleWiring:
         assert kwargs["hooks"].pre_flight_fn is pre_fn
         assert kwargs["hooks"].post_flight_fn is post_fn
 
+    def test_supplied_connect_fn_is_passed_to_lifecycle(self, mocker):
+        mock_run = _capture_lifecycle_call(mocker)
+        connect_fn = mocker.MagicMock()
+
+        run_wall_follow_flight(uri=_URI, connect_fn=connect_fn)
+
+        _, kwargs = mock_run.call_args
+        assert kwargs["connect_fn"] is connect_fn
+
+    def test_connect_fn_defaults_to_none_so_lifecycle_uses_connect_cflib(self, mocker):
+        mock_run = _capture_lifecycle_call(mocker)
+
+        run_wall_follow_flight(uri=_URI)
+
+        _, kwargs = mock_run.call_args
+        assert kwargs["connect_fn"] is None
+
     def test_no_adaptive_corrector_hook_set(self, mocker):
         mock_run = _capture_lifecycle_call(mocker)
 

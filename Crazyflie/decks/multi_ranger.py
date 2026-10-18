@@ -1,6 +1,6 @@
 """Multi-ranger deck interface for Crazyflie 2.0.
 
-Wraps cflib.utils.multiranger.Multiranger to provide distance readings
+Wraps the drone's Multi-ranger (DroneConnection.open_ranger) to provide distance readings
 in all five directions: front, back, left, right, up.
 
 Distances are in meters with mm precision, up to 8 m.
@@ -9,17 +9,18 @@ A reading of None means nothing is within sensor range (≥ 8 m) - not a fault.
 Requires both a Multi-ranger deck and a Flow deck to be fitted.
 
 Example:
-    >>> with SyncCrazyflie(URI) as scf:
-    ...     with MultiRangerDeck(scf) as ranger:
+    >>> with connect_cflib(URI) as drone:
+    ...     with MultiRangerDeck(drone) as ranger:
     ...         print(ranger.front)   # distance ahead in meters
     ...         if ranger.is_obstacle_within(0.5):
     ...             print("Something close!")
 """
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from types import TracebackType
 
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-from cflib.utils.multiranger import Multiranger
+from Crazyflie.hardware.drone_connection import DroneConnection, RangerDevice
 
 MAX_RANGE_M: float = 8.0  # sensor maximum range in meters; None returned beyond this
 
@@ -50,55 +51,62 @@ class MultiRangerDeck:
     are started on entry and stopped on exit.
 
     Example:
-        >>> with SyncCrazyflie(URI) as scf:
-        ...     with MultiRangerDeck(scf) as ranger:
+        >>> with connect_cflib(URI) as drone:
+        ...     with MultiRangerDeck(drone) as ranger:
         ...         readings = ranger.get_readings()
         ...         print(f"Front: {readings.front} m")
     """
 
-    def __init__(self, scf: SyncCrazyflie) -> None:
+    def __init__(self, drone: DroneConnection) -> None:
         """Initialize the deck interface.
 
         Args:
-            scf: Connected SyncCrazyflie instance.
+            drone: Connected drone.
         """
-        self._scf = scf
-        self._multiranger: Multiranger | None = None
+        self._drone = drone
+        self._ranger_cm: AbstractContextManager[RangerDevice] | None = None
+        self._ranger: RangerDevice | None = None
 
     def __enter__(self) -> MultiRangerDeck:
-        self._multiranger = Multiranger(self._scf)
-        self._multiranger.__enter__()
+        self._ranger_cm = self._drone.open_ranger()
+        self._ranger = self._ranger_cm.__enter__()
         return self
 
-    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
-        if self._multiranger is not None:
-            self._multiranger.__exit__(exc_type, exc_val, exc_tb)
-            self._multiranger = None
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if self._ranger_cm is not None:
+            self._ranger_cm.__exit__(exc_type, exc_val, exc_tb)
+            self._ranger_cm = None
+            self._ranger = None
 
     @property
     def front(self) -> float | None:
         """Distance ahead in meters, or None if nothing within 8 m."""
-        return self._multiranger.front if self._multiranger else None
+        return self._ranger.front if self._ranger else None
 
     @property
     def back(self) -> float | None:
         """Distance behind in meters, or None if nothing within 8 m."""
-        return self._multiranger.back if self._multiranger else None
+        return self._ranger.back if self._ranger else None
 
     @property
     def left(self) -> float | None:
         """Distance to the left in meters, or None if nothing within 8 m."""
-        return self._multiranger.left if self._multiranger else None
+        return self._ranger.left if self._ranger else None
 
     @property
     def right(self) -> float | None:
         """Distance to the right in meters, or None if nothing within 8 m."""
-        return self._multiranger.right if self._multiranger else None
+        return self._ranger.right if self._ranger else None
 
     @property
     def up(self) -> float | None:
         """Distance above in meters, or None if nothing within 8 m."""
-        return self._multiranger.up if self._multiranger else None
+        return self._ranger.up if self._ranger else None
 
     def get_readings(self) -> MultiRangerReadings:
         """Return a snapshot of all five distance readings.

@@ -1,6 +1,6 @@
 """Interruptible flight path executor for Crazyflie 2.0.
 
-Mirrors the PathRunner API but uses non-blocking MotionCommander calls
+Mirrors the PathRunner API but uses non-blocking MotionControl calls
 (start_forward / start_back / etc.) so that should_abort is checked every
 100 ms during movement, not only between steps.
 
@@ -26,7 +26,7 @@ exempt because their velocity is in deg/s.
 Example:
     >>> state = FlightState()
     >>> controller = SafeFlightController(OUT_AND_BACK_PATH, flight_state=state)
-    >>> with MotionCommander(scf) as mc:
+    >>> with drone.motion_commander() as mc:
     ...     controller.run_out_and_back(
     ...         mc,
     ...         should_abort=lambda: (
@@ -43,9 +43,8 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from cflib.positioning.motion_commander import MotionCommander
-
 from Crazyflie.flight.path_runner import REVERSE_DIRECTION, FlightStep
+from Crazyflie.hardware.drone_connection import MotionControl
 from Crazyflie.safety.collision_monitor import MAX_SAFE_VELOCITY_M_S
 from Crazyflie.state.flight_state import FlightState
 
@@ -90,7 +89,7 @@ _TURN_COMMANDS: frozenset[str] = frozenset({"turn_left", "turn_right"})
 class SafeFlightController:
     """Executes FlightSteps with interruptible, non-blocking movements.
 
-    Uses start_*/stop MotionCommander calls and polls should_abort every
+    Uses start_*/stop MotionControl calls and polls should_abort every
     50 ms so monitors can interrupt mid-move, not only between steps.
 
     When a FlightState is provided, the current velocity is written to it
@@ -178,13 +177,13 @@ class SafeFlightController:
 
     def run(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path in order.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             should_abort: Optional callable checked before each step and every
                           50 ms during movement and settle. Return True to stop.
 
@@ -211,7 +210,7 @@ class SafeFlightController:
 
     def run_out_and_back(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path outbound, pivot 180°, then retrace back home.
@@ -224,7 +223,7 @@ class SafeFlightController:
         pivot velocity is in deg/s, not m/s.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             should_abort: Optional callable checked every 50 ms.
 
         Raises:
@@ -292,7 +291,7 @@ class SafeFlightController:
 
     def run_reversed(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         should_abort: Callable[[], bool] | None = None,
     ) -> None:
         """Execute the path in reverse to return home.
@@ -300,7 +299,7 @@ class SafeFlightController:
         Steps run in reverse order and each direction is inverted.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             should_abort: Optional callable checked every 50 ms.
 
         Raises:
@@ -329,7 +328,7 @@ class SafeFlightController:
 
     def _execute(
         self,
-        mc: MotionCommander,
+        mc: MotionControl,
         command: str,
         distance_m: float,
         velocity: float,
@@ -347,7 +346,7 @@ class SafeFlightController:
         turn/nudge, extends duration_s by the correction time, resumes movement.
 
         Args:
-            mc: Active MotionCommander instance.
+            mc: Active MotionControl instance.
             command: Movement command name ('forward', 'turn_left', etc.).
             distance_m: Distance in meters (or degrees for turns).
             velocity: Speed in m/s (or deg/s for turns).

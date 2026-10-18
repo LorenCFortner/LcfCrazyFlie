@@ -10,10 +10,8 @@ import logging
 import time
 from pathlib import Path
 
-import cflib.crtp
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-
 from Crazyflie.decks.multi_ranger import MultiRangerDeck
+from Crazyflie.hardware.cflib_connection import connect_cflib
 from Crazyflie.observability.run_logging import configure_run_logging
 
 URI = "radio://0/1/250K"
@@ -36,8 +34,6 @@ def main() -> None:
     configure_run_logging(__name__, _LOG_FILE)
     logger.info(f"Writing full run log to {_LOG_FILE}")
 
-    cflib.crtp.init_drivers(enable_debug_driver=False)
-
     logger.info(f"Connecting to {URI}...")
     logger.info("Streaming sensor readings - press Ctrl+C to stop.")
 
@@ -45,8 +41,8 @@ def main() -> None:
         return f"{v:.3f}" if v is not None else " None"
 
     try:
-        with SyncCrazyflie(URI) as scf:
-            with MultiRangerDeck(scf) as ranger:
+        with connect_cflib(URI) as drone:
+            with MultiRangerDeck(drone) as ranger:
                 while True:
                     readings = ranger.get_readings()
                     logger.info(

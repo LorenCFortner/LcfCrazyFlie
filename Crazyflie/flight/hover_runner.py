@@ -19,6 +19,7 @@ from Crazyflie.flight.flight_lifecycle import (
     handle_safety_events,
     run_flight_lifecycle,
 )
+from Crazyflie.hardware.drone_connection import ConnectFn
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ def run_hover_flight(
     uri: str,
     hover_duration_s: float,
     telemetry_file: Path | None = None,
+    connect_fn: ConnectFn | None = None,
 ) -> None:
     """Execute a take-off, hover and landing with the full safety architecture.
 
@@ -47,6 +49,8 @@ def run_hover_flight(
             less hovers for no time at all.
         telemetry_file: Optional path to write continuous sensor telemetry
             to as CSV. When None, no telemetry is recorded.
+        connect_fn: Optional factory returning a context manager that yields the
+            DroneConnection to fly. Defaults to connecting over cflib when None.
     """
 
     def _flight_body(ctx: FlightContext) -> None:
@@ -90,4 +94,4 @@ def run_hover_flight(
 
         logger.info("Hover complete - landing.")
 
-    run_flight_lifecycle(uri, _flight_body, telemetry_file=telemetry_file)
+    run_flight_lifecycle(uri, _flight_body, telemetry_file=telemetry_file, connect_fn=connect_fn)

@@ -5,12 +5,43 @@ connected DroneConnection each time. No state is held here; the
 drone firmware owns the LED state.
 """
 
+from enum import IntEnum
+
 from Crazyflie.hardware.drone_connection import DroneConnection
 
 _MIN_HEIGHT_MM: int = 20
 _MAX_HEIGHT_MM: int = 1164
 _MIN_BRIGHTNESS: int = 31
 _MAX_BRIGHTNESS: int = 255
+_MIN_CHANNEL: int = 0
+_MAX_CHANNEL: int = 255
+
+
+class LedRingEffect(IntEnum):
+    """Firmware LED ring effects (the ``ring.effect`` parameter).
+
+    Ids match ``effectsFct[]`` in the crazyflie-firmware ``ledring12.c``.
+    """
+
+    OFF = 0
+    WHITE_SPINNER = 1
+    COLOR_SPINNER = 2
+    TILT = 3
+    GYRO_BRIGHTNESS = 4
+    COLOR_SPINNER_2 = 5
+    DOUBLE_SPINNER = 6
+    SOLID_COLOR = 7
+    FACTORY_TEST = 8
+    BATTERY = 9
+    BOAT_LIGHTS = 10
+    SIREN = 11
+    GRAVITY = 12
+    VIRTUAL_MEMORY = 13
+    FADE_COLOR = 14
+    LINK_QUALITY = 15
+    LOCATION_SERVICE = 16
+    TIMING_MEMORY = 17
+    LIGHTHOUSE = 18
 
 
 class LedRingDeck:
@@ -23,6 +54,11 @@ class LedRingDeck:
         ...     LedRingDeck.headlights_on(drone)
         ...     LedRingDeck.set_color_rgb(drone, 255, 0, 0)
     """
+
+    @staticmethod
+    def _clamp_channel(value: int) -> int:
+        """Clamp a color channel value to the 0-255 range."""
+        return max(_MIN_CHANNEL, min(_MAX_CHANNEL, value))
 
     @staticmethod
     def headlights_on(drone: DroneConnection) -> None:
@@ -65,13 +101,43 @@ class LedRingDeck:
             green: Green channel (0-255).
             blue: Blue channel (0-255).
         """
-        red = max(0, min(255, red))
-        green = max(0, min(255, green))
-        blue = max(0, min(255, blue))
+        red = LedRingDeck._clamp_channel(red)
+        green = LedRingDeck._clamp_channel(green)
+        blue = LedRingDeck._clamp_channel(blue)
 
         drone.set_param("ring.solidRed", str(red))
         drone.set_param("ring.solidGreen", str(green))
         drone.set_param("ring.solidBlue", str(blue))
+
+    @staticmethod
+    def set_fade_color(
+        drone: DroneConnection, red: int, green: int, blue: int, fade_time_s: float
+    ) -> None:
+        """Start a fade to an RGB color (used by the FADE_COLOR effect).
+
+        Values outside 0-255 are clamped. The fade time is written first because the firmware
+        starts the fade when ``ring.fadeColor`` changes. This does not select the effect; call
+        ``set_effect(drone, LedRingEffect.FADE_COLOR)`` separately.
+
+        Args:
+            drone: Connected drone.
+            red: Red channel (0-255).
+            green: Green channel (0-255).
+            blue: Blue channel (0-255).
+            fade_time_s: Fade duration in seconds; 0.0 changes color instantly.
+
+        Raises:
+            ValueError: If fade_time_s is negative.
+        """
+        if fade_time_s < 0:
+            raise ValueError(f"fade_time_s must not be negative, got {fade_time_s}")
+
+        red = LedRingDeck._clamp_channel(red)
+        green = LedRingDeck._clamp_channel(green)
+        blue = LedRingDeck._clamp_channel(blue)
+
+        drone.set_param("ring.fadeTime", str(fade_time_s))
+        drone.set_param("ring.fadeColor", str((red << 16) | (green << 8) | blue))
 
     @staticmethod
     def set_brightness(drone: DroneConnection, brightness: int) -> None:
@@ -105,9 +171,14 @@ class LedRingDeck:
 
     @staticmethod
     def turn_off(drone: DroneConnection) -> None:
-        """Turn off all LEDs on the ring.
+        """Turn the whole LED ring dark - effect off, headlights off, solid colors zeroed.
 
         Args:
             drone: Connected drone.
+
+        Raises:
+            KeyError: If the LED ring deck is not detected (ring.* not in the TOC).
         """
+        LedRingDeck.set_effect(drone, LedRingEffect.OFF)
+        LedRingDeck.headlights_off(drone)
         LedRingDeck.set_color_rgb(drone, 0, 0, 0)

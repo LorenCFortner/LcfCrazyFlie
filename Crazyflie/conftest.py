@@ -3,6 +3,13 @@
 import pytest
 
 from Crazyflie.hardware.drone_connection import DroneConnection, MotionControl
+from Crazyflie.hardware.fake_connection import FakeConnection
+
+
+@pytest.fixture
+def fake_drone():
+    """In-memory FakeConnection - scriptable sensor values, recorded commands."""
+    return FakeConnection()
 
 
 @pytest.fixture

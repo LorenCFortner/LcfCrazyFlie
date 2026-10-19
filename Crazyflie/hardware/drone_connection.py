@@ -52,31 +52,31 @@ class LogSubscription(Protocol):
 
 
 class RangerDevice(Protocol):
-    """Multi-ranger distance readings in metres; None means nothing within range."""
+    """Multi-ranger distance readings in meters; None means nothing within range."""
 
     @property
     def front(self) -> float | None:
-        """Distance ahead in metres, or None."""
+        """Distance ahead in meters, or None."""
         ...
 
     @property
     def back(self) -> float | None:
-        """Distance behind in metres, or None."""
+        """Distance behind in meters, or None."""
         ...
 
     @property
     def left(self) -> float | None:
-        """Distance to the left in metres, or None."""
+        """Distance to the left in meters, or None."""
         ...
 
     @property
     def right(self) -> float | None:
-        """Distance to the right in metres, or None."""
+        """Distance to the right in meters, or None."""
         ...
 
     @property
     def up(self) -> float | None:
-        """Distance above in metres, or None."""
+        """Distance above in meters, or None."""
         ...
 
 
@@ -85,7 +85,7 @@ class MotionControl(Protocol):
 
     Parameter names and defaults match cflib's MotionCommander exactly so it
     satisfies this protocol structurally, with no wrapper. Distances are in
-    metres, velocities in m/s, rotations in degrees and turn rates in deg/s.
+    meters, velocities in m/s, rotations in degrees and turn rates in deg/s.
     """
 
     def forward(self, distance_m: float, velocity: float = ...) -> None:

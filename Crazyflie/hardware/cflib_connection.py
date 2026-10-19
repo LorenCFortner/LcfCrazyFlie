@@ -159,7 +159,7 @@ class CflibConnection:
 
 @contextmanager
 def connect_cflib(uri: str) -> Iterator[CflibConnection]:
-    """Initialise cflib drivers and open a link to the drone.
+    """Initialize cflib drivers and open a link to the drone.
 
     Args:
         uri: Radio or USB URI, e.g. "radio://0/1/250K".

@@ -6,21 +6,31 @@ lifecycle to Crazyflie.flight.flight_lifecycle.run_flight_lifecycle() - that
 machinery is covered by test_flight_lifecycle.py. These tests mock
 run_flight_lifecycle itself and invoke the flight body it was handed, driving a
 fake clock so nothing really sleeps.
+
+TestHoverFlightOnFakeDrone is the exception: it flies the real lifecycle end to
+end against an in-memory FakeConnection.
 """
 
 import logging
 import queue
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from Crazyflie.flight import flight_lifecycle
 from Crazyflie.flight.flight_lifecycle import EVENT_WAIT_TIMEOUT_S, FlightContext
 from Crazyflie.flight.hover_runner import run_hover_flight
 from Crazyflie.flight.tests.conftest import capture_lifecycle_call
+from Crazyflie.hardware.drone_connection import MotionControl
+from Crazyflie.hardware.fake_connection import FakeConnection, MotionCommand, connect_fake
 
 _MODULE = "Crazyflie.flight.hover_runner"
 _TICK_S = 0.1
+URI = "radio://0/1/250K"  # Ignored by the fake drone.
 
 
 class _FakeClock:
@@ -157,3 +167,72 @@ def test_status_line_format_is_exact(mocker, caplog):
         _run_body(mocker, 10.0, battery_v=3.95)
 
     assert "  Hover: 4s / 10s  | battery: 3.95 V" in caplog.text
+
+
+class _BatteryDropsAfterTakeoff(FakeConnection):
+    """FakeConnection whose battery falls below the BATLOW threshold once airborne."""
+
+    @contextmanager
+    def motion_commander(self) -> Iterator[MotionControl]:
+        with super().motion_commander() as mc:
+            self.set_log_values(**{"pm.vbat": 3.2})
+            yield mc
+
+
+class TestHoverFlightOnFakeDrone:
+    @pytest.fixture(autouse=True)
+    def _fast_lifecycle(self, monkeypatch):
+        monkeypatch.setattr(flight_lifecycle, "_POST_DISCONNECT_SLEEP_S", 0.0)
+        monkeypatch.setattr(flight_lifecycle, "_STABILIZE_STEPS", 1)
+
+    def test_happy_path_takes_off_hovers_and_lands(self, fake_drone):
+        run_hover_flight(URI, hover_duration_s=0.3, connect_fn=lambda: connect_fake(fake_drone))
+
+        calls = fake_drone.calls
+        assert calls[:3] == ["connect", "stop_setpoints", "arm"]
+        assert calls.index("takeoff") < calls.index("land")
+        assert calls[-2:] == ["stop_setpoints", "disconnect"]
+        assert fake_drone.mc.commands == []
+
+    def test_happy_path_sets_up_and_turns_off_the_led_ring(self, fake_drone):
+        run_hover_flight(URI, hover_duration_s=0.3, connect_fn=lambda: connect_fake(fake_drone))
+
+        writes = fake_drone.param_writes
+        assert writes.index(("ring.effect", "7")) < writes.index(("ring.solidRed", "0"))
+        params = fake_drone.params
+        assert (params["ring.solidRed"], params["ring.solidGreen"], params["ring.solidBlue"]) == (
+            "0",
+            "0",
+            "0",
+        )
+
+    def test_blocked_clearance_never_takes_off(self, fake_drone):
+        fake_drone.set_ranges(front=0.05)
+
+        run_hover_flight(URI, hover_duration_s=0.3, connect_fn=lambda: connect_fake(fake_drone))
+
+        assert "takeoff" not in fake_drone.calls
+        assert fake_drone.calls[-1] == "disconnect"
+
+    def test_low_battery_mid_hover_lands_early(self):
+        drone = _BatteryDropsAfterTakeoff()
+        hover_duration_s = 5.0
+
+        start_s = time.monotonic()
+        run_hover_flight(URI, hover_duration_s, connect_fn=lambda: connect_fake(drone))
+        elapsed_s = time.monotonic() - start_s
+
+        assert drone.mc.commands == [MotionCommand("stop", ()), MotionCommand("land", (0.2,))]
+        assert elapsed_s < hover_duration_s
+        assert drone.calls[-1] == "disconnect"
+
+    def test_unverified_takeoff_skips_the_hover_and_still_lands(self, caplog):
+        drone = FakeConnection(takeoff_height_mm=0)
+
+        with caplog.at_level(logging.INFO):
+            run_hover_flight(URI, hover_duration_s=0.3, connect_fn=lambda: connect_fake(drone))
+
+        assert "Takeoff failed" in caplog.text
+        assert "Hovering for" not in caplog.text
+        assert drone.calls.index("takeoff") < drone.calls.index("land")
+        assert drone.calls[-1] == "disconnect"

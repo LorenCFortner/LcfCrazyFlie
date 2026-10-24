@@ -40,6 +40,9 @@ class TestStart:
             header = next(csv.reader(f))
         assert header == CSV_HEADER
 
+    def test_header_has_yaw_deg_right_after_pitch_deg(self):
+        assert CSV_HEADER[CSV_HEADER.index("pitch_deg") + 1] == "yaw_deg"
+
     def test_overwrites_existing_file(self, tmp_path):
         csv_path = tmp_path / "run_telemetry.csv"
         csv_path.write_text("stale content\n", encoding="utf-8")
@@ -76,6 +79,7 @@ class TestRecordRanger:
         assert row["commanded_velocity"] == "0.5"
         assert row["roll_deg"] == ""
         assert row["battery_v"] == ""
+        assert row["yaw_deg"] == ""
 
     def test_writes_custom_context(self, tmp_path):
         csv_path = tmp_path / "run_telemetry.csv"
@@ -135,6 +139,7 @@ class TestRecordStabilizer:
         assert row["context"] == "poll"
         assert row["roll_deg"] == "1.5"
         assert row["pitch_deg"] == "-2.0"
+        assert row["yaw_deg"] == "10.0"
         assert row["height_mm"] == "300"
         assert row["battery_v"] == "3.9"
         assert row["front"] == ""
@@ -158,6 +163,7 @@ class TestRecordLink:
         assert row["uplink_rssi"] == "180.0"
         assert row["front"] == ""
         assert row["battery_v"] == ""
+        assert row["yaw_deg"] == ""
 
     def test_none_values_write_as_blank(self, tmp_path):
         csv_path = tmp_path / "run_telemetry.csv"

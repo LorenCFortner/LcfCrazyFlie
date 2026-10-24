@@ -3,6 +3,7 @@
 Written test-first following the TDD rules for this project.
 """
 
+import logging
 import math
 from collections.abc import Callable
 
@@ -832,8 +833,8 @@ class TestArcAroundCorner:
         mock_mc = mocker.MagicMock()
         mock_ranger = mocker.MagicMock()
         mock_ranger.get_readings.side_effect = [
-            _readings(front=2.0, right=1.0),
-            _readings(front=cfg.target_wall_distance_m, right=1.0),
+            _readings(front=2.0, right=None),
+            _readings(front=cfg.target_wall_distance_m, right=None),
         ]
         mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
 
@@ -938,6 +939,227 @@ class TestArcAroundCorner:
 
         call = mock_mc.start_linear_motion.call_args_list[0]
         assert call.kwargs["rate_yaw"] == pytest.approx(-cfg.max_yaw_rate_deg_s)
+
+
+def _arc_base_yaw_deg_s(cfg: WallFollowConfig) -> float:
+    radius = cfg.target_wall_distance_m / _SQRT2
+    return -math.degrees(cfg.follow_velocity_m_s / radius)
+
+
+def _first_arc_yaw_rate(mocker, cfg: WallFollowConfig, right: float | None) -> float:
+    """Run one arc cycle with a constant right reading and return its commanded rate_yaw."""
+    follower = WallFollower(cfg)
+    mock_mc = mocker.MagicMock()
+    mock_ranger = mocker.MagicMock()
+    mock_ranger.get_readings.side_effect = [
+        _readings(front=2.0, right=right),
+        _readings(front=cfg.target_wall_distance_m, right=right),
+    ]
+    mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+    follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+    return mock_mc.start_linear_motion.call_args_list[0].kwargs["rate_yaw"]
+
+
+class TestArcClosedLoop:
+    def test_config_defaults(self):
+        cfg = WallFollowConfig()
+
+        assert cfg.arc_radius_gain_deg_per_m == 40.0
+        assert cfg.max_arc_right_reading_m == 1.2
+        assert cfg.min_arc_yaw_fraction == 0.5
+
+    @pytest.mark.parametrize(
+        "right", [None, 0.0, WallFollowConfig().max_arc_right_reading_m + 0.1]
+    )
+    def test_no_correction_when_right_gives_no_information(self, mocker, right):
+        cfg = WallFollowConfig()
+
+        rate = _first_arc_yaw_rate(mocker, cfg, right)
+
+        assert rate == pytest.approx(_arc_base_yaw_deg_s(cfg))
+
+    def test_tightens_when_right_is_wider_than_radius(self, mocker):
+        cfg = WallFollowConfig()
+        radius = cfg.target_wall_distance_m / _SQRT2
+        base = _arc_base_yaw_deg_s(cfg)
+
+        rate = _first_arc_yaw_rate(mocker, cfg, right=0.9)
+
+        assert rate == pytest.approx(base - cfg.arc_radius_gain_deg_per_m * (0.9 - radius))
+        assert rate < base
+
+    def test_widens_when_right_is_closer_than_radius(self, mocker):
+        cfg = WallFollowConfig()
+        radius = cfg.target_wall_distance_m / _SQRT2
+        base = _arc_base_yaw_deg_s(cfg)
+
+        rate = _first_arc_yaw_rate(mocker, cfg, right=0.35)
+
+        assert rate == pytest.approx(base - cfg.arc_radius_gain_deg_per_m * (0.35 - radius))
+        assert base < rate < 0.0
+
+    def test_tight_correction_is_clamped_to_max_yaw_rate(self, mocker):
+        cfg = WallFollowConfig(arc_radius_gain_deg_per_m=200.0)
+
+        rate = _first_arc_yaw_rate(mocker, cfg, right=1.2)
+
+        assert rate == pytest.approx(-cfg.max_yaw_rate_deg_s)
+
+    def test_wide_correction_never_stops_or_reverses_the_turn(self, mocker):
+        cfg = WallFollowConfig(arc_radius_gain_deg_per_m=200.0)
+        base = _arc_base_yaw_deg_s(cfg)
+        radius = cfg.target_wall_distance_m / _SQRT2
+        # Sanity: the uncorrected formula would turn the drone left.
+        assert base - cfg.arc_radius_gain_deg_per_m * (0.26 - radius) > 0.0
+
+        rate = _first_arc_yaw_rate(mocker, cfg, right=0.26)
+
+        assert rate == pytest.approx(base * cfg.min_arc_yaw_fraction)
+        assert rate < 0.0
+
+    def test_budget_counts_the_actual_commanded_yaw(self, mocker):
+        cfg = WallFollowConfig(max_corner_arc_deg=10.0)
+        base = _arc_base_yaw_deg_s(cfg)
+        radius = cfg.target_wall_distance_m / _SQRT2
+        tight_yaw = base - cfg.arc_radius_gain_deg_per_m * (0.9 - radius)
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        def calls_before_budget_ends(right: float | None) -> int:
+            follower = WallFollower(cfg)
+            mock_mc = mocker.MagicMock()
+            mock_ranger = mocker.MagicMock()
+            mock_ranger.get_readings.return_value = _readings(front=2.0, right=right)
+            assert follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None) is False
+            return mock_mc.start_linear_motion.call_count
+
+        plain_calls = calls_before_budget_ends(None)
+        tight_calls = calls_before_budget_ends(0.9)
+
+        assert plain_calls == math.ceil(10.0 / (abs(base) * _POLL_INTERVAL_S))
+        assert tight_calls == math.ceil(10.0 / (abs(tight_yaw) * _POLL_INTERVAL_S))
+        assert tight_calls < plain_calls
+
+    def test_pinned_minimum_turn_still_ends_within_the_budget(self, mocker):
+        cfg = WallFollowConfig(arc_radius_gain_deg_per_m=200.0)
+        base = _arc_base_yaw_deg_s(cfg)
+        expected_calls = math.ceil(
+            cfg.max_corner_arc_deg / (abs(base) * cfg.min_arc_yaw_fraction * _POLL_INTERVAL_S)
+        )
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        # One reading longer than needed: a loop that never ends fails with StopIteration.
+        mock_ranger.get_readings.side_effect = [_readings(front=2.0, right=0.26)] * (
+            expected_calls + 1
+        )
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        result = follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is False
+        assert mock_mc.start_linear_motion.call_count == expected_calls
+
+
+class TestArcLogging:
+    def test_reacquire_logs_info_with_degrees_traveled(self, mocker, caplog):
+        cfg = WallFollowConfig()
+        follower = WallFollower(cfg)
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.side_effect = [
+            _readings(front=2.0, right=None),
+            _readings(front=2.0, right=None),
+            _readings(front=cfg.target_wall_distance_m, right=None),
+        ]
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+        traveled_deg = 2 * abs(_arc_base_yaw_deg_s(cfg)) * _POLL_INTERVAL_S
+
+        with caplog.at_level(logging.INFO):
+            result = follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is True
+        expected = f"corner negotiated after {traveled_deg:.0f} deg of arc - resuming follow."
+        assert expected in caplog.text
+
+    def test_budget_exhaustion_logs_warning_with_last_readings(self, mocker, caplog):
+        follower = WallFollower(WallFollowConfig(max_corner_arc_deg=10.0))
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=2.0, right=None)
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        with caplog.at_level(logging.WARNING):
+            result = follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is False
+        assert "corner arc budget (10 deg) exhausted" in caplog.text
+        assert "front=2.00 m" in caplog.text
+        assert "right=none" in caplog.text
+
+    def test_zero_budget_logs_warning_with_no_readings(self, mocker, caplog):
+        follower = WallFollower(WallFollowConfig(max_corner_arc_deg=0.0))
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+
+        with caplog.at_level(logging.WARNING):
+            result = follower._arc_around_corner(mock_mc, mock_ranger, should_abort=None)
+
+        assert result is False
+        mock_ranger.get_readings.assert_not_called()
+        assert "front=none" in caplog.text
+        assert "right=none" in caplog.text
+
+
+_CORNER_PHASES = [
+    lambda f, mc, ranger, abort: f._rotate_perpendicular_to_wall(mc, ranger, abort),
+    lambda f, mc, ranger, abort: f._advance_past_corner_apex(mc, ranger, abort, 0.55),
+    lambda f, mc, ranger, abort: f._arc_around_corner(mc, ranger, abort),
+]
+
+
+class TestCornerManeuverLogging:
+    def test_advance_budget_exhaustion_logs_warning(self, mocker, caplog):
+        follower = WallFollower(WallFollowConfig(max_corner_advance_m=0.2))
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=1.0, right=0.55)  # never spikes
+        mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
+
+        with caplog.at_level(logging.WARNING):
+            result = follower._advance_past_corner_apex(
+                mock_mc, mock_ranger, should_abort=None, baseline_right=0.55
+            )
+
+        assert result is False
+        assert "corner advance budget (0.2 m) exhausted" in caplog.text
+
+    @pytest.mark.parametrize("run_phase", _CORNER_PHASES, ids=["rotate", "advance", "arc"])
+    def test_too_close_logs_warning(self, mocker, caplog, run_phase):
+        follower = WallFollower(WallFollowConfig(abort_distance_m=0.25))
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=2.0, left=0.10, right=0.55)
+
+        with caplog.at_level(logging.WARNING):
+            result = run_phase(follower, mock_mc, mock_ranger, None)
+
+        assert result is False
+        assert "within abort_distance_m (0.25 m) during corner negotiation" in caplog.text
+
+    @pytest.mark.parametrize("run_phase", _CORNER_PHASES, ids=["rotate", "advance", "arc"])
+    def test_should_abort_is_not_logged(self, mocker, caplog, run_phase):
+        follower = WallFollower(WallFollowConfig())
+        mock_mc = mocker.MagicMock()
+        mock_ranger = mocker.MagicMock()
+        mock_ranger.get_readings.return_value = _readings(front=2.0, right=0.55)
+
+        with caplog.at_level(logging.WARNING):
+            result = run_phase(follower, mock_mc, mock_ranger, lambda: True)
+
+        assert result is False
+        assert caplog.records == []
 
 
 class TestNegotiateOuterCorner:
@@ -1305,7 +1527,7 @@ class TestFollow:
 
         mock_negotiate.assert_not_called()
 
-    def test_failed_negotiation_stops_flight(self, mocker):
+    def test_failed_negotiation_stops_flight(self, mocker, caplog):
         cfg = WallFollowConfig(follow_duration_s=100.0)
         follower = WallFollower(cfg)
         mock_mc = mocker.MagicMock()
@@ -1322,9 +1544,11 @@ class TestFollow:
         mocker.patch("Crazyflie.flight.wall_follower.time.sleep")
         mocker.patch.object(WallFollower, "_negotiate_outer_corner", return_value=False)
 
-        follower.follow(mock_mc, mock_ranger, should_abort=None)
+        with caplog.at_level(logging.WARNING):
+            follower.follow(mock_mc, mock_ranger, should_abort=None)
 
         mock_mc.stop.assert_called_once()
+        assert "outward corner negotiation failed" in caplog.text
 
     def test_second_negotiation_gets_a_non_none_baseline_right(self, mocker):
         """Regression: previous_right is reset after a successful

@@ -45,6 +45,7 @@ CSV_HEADER: list[str] = [
     "commanded_velocity",
     "roll_deg",
     "pitch_deg",
+    "yaw_deg",
     "height_mm",
     "battery_v",
     "link_quality",
@@ -121,6 +122,9 @@ class FlightRecorder:
     def record_stabilizer(self, state: DroneState) -> None:
         """Append one stabilizer-sourced row.
 
+        Writes roll, pitch, yaw, height and battery; yaw_deg lets a flight
+        review compare the real turn over a corner arc with the commanded one.
+
         Args:
             state: Current DroneState snapshot.
         """
@@ -129,6 +133,7 @@ class FlightRecorder:
             context="poll",
             roll_deg=state.roll_deg,
             pitch_deg=state.pitch_deg,
+            yaw_deg=state.yaw_deg,
             height_mm=state.height_mm,
             battery_v=state.battery_v,
         )
@@ -170,6 +175,7 @@ class FlightRecorder:
         commanded_velocity: float | None = None,
         roll_deg: float | None = None,
         pitch_deg: float | None = None,
+        yaw_deg: float | None = None,
         height_mm: int | None = None,
         battery_v: float | None = None,
         link_quality: float | None = None,
@@ -188,6 +194,7 @@ class FlightRecorder:
             commanded_velocity if commanded_velocity is not None else "",
             roll_deg if roll_deg is not None else "",
             pitch_deg if pitch_deg is not None else "",
+            yaw_deg if yaw_deg is not None else "",
             height_mm if height_mm is not None else "",
             battery_v if battery_v is not None else "",
             link_quality if link_quality is not None else "",

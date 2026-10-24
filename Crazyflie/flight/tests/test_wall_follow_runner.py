@@ -7,12 +7,22 @@ teardown lifecycle to Crazyflie.flight.flight_lifecycle.run_flight_lifecycle()
 run_flight_lifecycle itself and inspect/invoke the flight_body_fn it builds,
 so they exercise only this runner's own logic: waiting for the first
 Multi-ranger reading, then the search -> align -> follow sequence.
+
+TestWallFollowFlightOnFakeDrone is the exception: it flies the real lifecycle,
+monitor threads and recorder end to end against an in-memory FakeConnection.
 """
 
+import csv
+import logging
 import queue
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
+import pytest
+
 from Crazyflie.decks.multi_ranger import MultiRangerReadings
+from Crazyflie.flight import flight_lifecycle
 from Crazyflie.flight.flight_lifecycle import EVENT_WAIT_TIMEOUT_S, FlightContext
 from Crazyflie.flight.tests.conftest import capture_lifecycle_call
 from Crazyflie.flight.wall_follow_runner import (
@@ -21,6 +31,10 @@ from Crazyflie.flight.wall_follow_runner import (
     run_wall_follow_flight,
 )
 from Crazyflie.flight.wall_follower import WallFollowConfig
+from Crazyflie.hardware.drone_connection import MotionControl
+from Crazyflie.hardware.fake_connection import FakeConnection, MotionCommand, connect_fake
+
+URI = "radio://0/1/250K"  # Ignored by the fake drone.
 
 # ---------------------------------------------------------------------------
 # _CollisionMonitorRangerAdapter
@@ -348,3 +362,133 @@ class TestPostPhaseEventHandling:
         body_fn(ctx)
 
         mock_handle.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# End to end on the fake drone - real lifecycle, monitor threads and recorder
+# ---------------------------------------------------------------------------
+
+_WALL_M = 0.60  # front == right == target_wall_distance_m: aligned on arrival.
+
+
+class _CornerMotion:
+    """MotionControl wrapper that tells _OutsideCornerDrone what the flight is doing.
+
+    Delegates every call to the drone's FakeMotionControl (so drone.mc.commands
+    still records it) and reports the two calls the scenario reacts to.
+    """
+
+    def __init__(self, drone: _OutsideCornerDrone, mc: MotionControl) -> None:
+        self._drone = drone
+        self._mc = mc
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._mc, name)
+
+    def start_linear_motion(self, vx, vy, vz, rate_yaw=0.0) -> None:
+        self._mc.start_linear_motion(vx, vy, vz, rate_yaw=rate_yaw)
+        self._drone.on_linear_motion()
+
+    def turn_left(self, angle_degrees, rate=None) -> None:
+        if rate is None:
+            self._mc.turn_left(angle_degrees)
+        else:
+            self._mc.turn_left(angle_degrees, rate)
+        self._drone.on_turn_left(angle_degrees)
+
+
+class _OutsideCornerDrone(FakeConnection):
+    """A wall on the right that ends in an outside corner with nothing beyond it.
+
+    The drone starts aligned to the wall, so the search and alignment finish at
+    once. After _FOLLOW_CYCLES follow commands the front reading drops out (the
+    corner's front spike). The corner's 45 deg rotation then takes the right
+    reading out of range too (the edge has passed), and no wall ever comes
+    back, so the arc runs out its budget.
+    """
+
+    _FOLLOW_CYCLES = 5
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_ranges(front=_WALL_M, right=_WALL_M)
+        self._linear_motions = 0
+
+    @contextmanager
+    def motion_commander(self) -> Iterator[MotionControl]:
+        with super().motion_commander() as mc:
+            yield _CornerMotion(self, mc)
+
+    def on_linear_motion(self) -> None:
+        self._linear_motions += 1
+        if self._linear_motions == self._FOLLOW_CYCLES:
+            self.set_ranges(front=None)
+
+    def on_turn_left(self, angle_degrees: float) -> None:
+        if angle_degrees == 45.0:
+            self.set_ranges(right=None)
+
+
+def _read_csv(path) -> list[dict[str, str]]:
+    with path.open(newline="") as f:
+        return list(csv.DictReader(f))
+
+
+class TestWallFollowFlightOnFakeDrone:
+    @pytest.fixture(autouse=True)
+    def _fast_lifecycle(self, monkeypatch):
+        monkeypatch.setattr(flight_lifecycle, "_POST_DISCONNECT_SLEEP_S", 0.0)
+        monkeypatch.setattr(flight_lifecycle, "_STABILIZE_STEPS", 1)
+
+    def test_stabilizer_yaw_reaches_the_telemetry_csv(self, fake_drone, tmp_path):
+        fake_drone.set_log_values(**{"stabilizer.yaw": 30.0})
+        telemetry_file = tmp_path / "wall_follow_telemetry.csv"
+        # Nothing ahead and a short search: the flight takes off, finds no wall
+        # and lands, with the recorder running throughout.
+        config = WallFollowConfig(max_search_distance_m=0.3)
+
+        run_wall_follow_flight(
+            URI,
+            config=config,
+            telemetry_file=telemetry_file,
+            connect_fn=lambda: connect_fake(fake_drone),
+        )
+
+        rows = _read_csv(telemetry_file)
+        stabilizer_rows = [row for row in rows if row["source"] == "stabilizer"]
+        ranger_rows = [row for row in rows if row["source"] == "ranger"]
+        assert stabilizer_rows
+        assert all(float(row["yaw_deg"]) == pytest.approx(30.0) for row in stabilizer_rows)
+        assert ranger_rows
+        assert all(row["yaw_deg"] == "" for row in ranger_rows)
+
+    def test_failed_outside_corner_logs_why_then_stops_once_and_lands(self, caplog):
+        drone = _OutsideCornerDrone()
+        # A small arc budget keeps the real-time flight to about a second.
+        config = WallFollowConfig(max_corner_arc_deg=10.0)
+
+        with caplog.at_level(logging.INFO):
+            run_wall_follow_flight(URI, config=config, connect_fn=lambda: connect_fake(drone))
+
+        messages = [record.getMessage() for record in caplog.records]
+        corner_detected = next(i for i, m in enumerate(messages) if "outward corner detected" in m)
+        arc_exhausted = next(
+            i for i, m in enumerate(messages) if "corner arc budget (10 deg) exhausted" in m
+        )
+        negotiation_failed = next(
+            i for i, m in enumerate(messages) if "outward corner negotiation failed" in m
+        )
+        complete = next(i for i, m in enumerate(messages) if "Wall follow complete" in m)
+        assert corner_detected < arc_exhausted < negotiation_failed < complete
+        assert "front=none, right=none" in messages[arc_exhausted]
+
+        commands = drone.mc.commands
+        assert MotionCommand("turn_left", (45.0, 72.0)) in commands
+        corner_turn = commands.index(MotionCommand("turn_left", (45.0, 72.0)))
+        # The search leg's stop comes before the corner; follow() stops exactly
+        # once after it, and nothing else moves the drone afterwards.
+        stops_after_corner = [c for c in commands[corner_turn:] if c.name == "stop"]
+        assert stops_after_corner == [MotionCommand("stop", ())]
+        assert commands[-1] == MotionCommand("stop", ())
+        assert drone.calls.index("takeoff") < drone.calls.index("land")
+        assert drone.calls[-1] == "disconnect"

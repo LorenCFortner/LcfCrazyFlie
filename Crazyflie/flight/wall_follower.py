@@ -111,13 +111,19 @@ runs a fixed sequence instead of an open-ended wait:
      same kind of spike front just showed -- once right spikes too, the
      drone has passed the corner's edge laterally, not just visually via
      front. Bounded by max_corner_advance_m.
-  3. _arc_around_corner(): a constant-radius clockwise arc (forward
-     velocity plus a matching negative yaw rate) with radius equal to the
-     wall's target perpendicular standoff (target_wall_distance_m /
-     sqrt(2)), continuing until front picks up a wall at or inside
+  3. _arc_around_corner(): a clockwise arc (forward velocity plus a
+     negative yaw rate) aimed at a radius equal to the wall's target
+     perpendicular standoff (target_wall_distance_m / sqrt(2)). The base
+     yaw rate is the one that flies exactly that radius; each cycle then
+     corrects it from the right reading, which looks at the corner being
+     circled: right farther than the radius tightens the turn, closer
+     widens it (arc_radius_gain_deg_per_m), and a right reading that is
+     missing or above max_arc_right_reading_m is ignored. The rate never
+     drops below min_arc_yaw_fraction of the base, so the turn never
+     stops. Continues until front picks up a wall at or inside
      target_wall_distance_m -- geometrically the point on the arc where
      the drone is back at the 45 deg follow attitude relative to the new
-     wall face. Bounded by max_corner_arc_deg.
+     wall face. Bounded by max_corner_arc_deg of commanded rotation.
   4. Control returns to the ordinary follow() loop, which resumes
      compute_follow_command()-driven flight at follow_velocity_m_s (no
      brake on the first cycle back, since the arc was already flying at
@@ -237,6 +243,11 @@ class RangerSource(Protocol):
 FLIGHT_DIRECTION: str = "forward_left"
 
 
+def _format_range(distance_m: float | None) -> str:
+    """Format a range reading for a log message: "0.62 m", or "none" if missing."""
+    return "none" if distance_m is None else f"{distance_m:.2f} m"
+
+
 @dataclass
 class WallFollowConfig:
     """Tuning parameters for WallFollower.
@@ -290,7 +301,16 @@ class WallFollowConfig:
             when front spikes, so this is deliberately generous.
         max_corner_arc_deg: Rotation budget for _arc_around_corner()
             (phase 3) before giving up -- a 90 deg corner needs roughly
-            90 deg of arc, so this is deliberately generous.
+            90 deg of arc, so this is deliberately generous. Counts the
+            yaw actually commanded each cycle, not the rotation achieved.
+        arc_radius_gain_deg_per_m: Proportional gain converting the arc
+            radius error (right reading minus the arc radius, meters) into
+            an extra clockwise yaw rate (deg/s) in _arc_around_corner().
+        max_arc_right_reading_m: Right readings above this are treated as
+            not seeing the corner, so the arc applies no correction.
+        min_arc_yaw_fraction: The arc always turns clockwise at least this
+            fraction of its base yaw rate, so a widening correction can
+            never stop the turn and max_corner_arc_deg stays a real bound.
 
     Velocities are deliberately low. At follow_velocity_m_s = 0.15 m/s the
     estimated stopping distance (~4 cm, extrapolated from the repo's tuning
@@ -320,6 +340,9 @@ class WallFollowConfig:
     spike_confirm_cycles: int = 2
     max_corner_advance_m: float = 1.5
     max_corner_arc_deg: float = 180.0
+    arc_radius_gain_deg_per_m: float = 40.0
+    max_arc_right_reading_m: float = 1.2
+    min_arc_yaw_fraction: float = 0.5
 
 
 @dataclass
@@ -672,6 +695,7 @@ class WallFollower:
             return False
         readings = ranger.get_readings()
         if self.is_too_close(readings):
+            self._warn_corner_too_close()
             return False
 
         if self._flight_state is not None:
@@ -702,15 +726,25 @@ class WallFollower:
 
         Returns:
             The fresh readings, or None if should_abort() fired or the
-            readings are too close -- the caller should return False
-            immediately without commanding motion.
+            readings are too close (logged as a WARNING; a should_abort()
+            exit is not, the runner reports the safety event) -- the
+            caller should return False immediately without commanding
+            motion.
         """
         if should_abort is not None and should_abort():
             return None
         readings = ranger.get_readings()
         if self.is_too_close(readings):
+            self._warn_corner_too_close()
             return None
         return readings
+
+    def _warn_corner_too_close(self) -> None:
+        """Log that a corner-negotiation phase stopped on is_too_close()."""
+        logger.warning(
+            f"WallFollower: a sensor is within abort_distance_m "
+            f"({self._config.abort_distance_m:.2f} m) during corner negotiation - stopping."
+        )
 
     def _corner_negotiation_move(
         self,
@@ -799,6 +833,10 @@ class WallFollower:
                 return False
             distance_traveled_m += cfg.follow_velocity_m_s * _POLL_INTERVAL_S
 
+        logger.warning(
+            f"WallFollower: corner advance budget ({cfg.max_corner_advance_m:.1f} m) "
+            "exhausted without the right edge passing - stopping."
+        )
         return False
 
     def _arc_around_corner(
@@ -807,14 +845,27 @@ class WallFollower:
         ranger: RangerSource,
         should_abort: Callable[[], bool] | None,
     ) -> bool:
-        """Outward-corner negotiation, phase 3: arc around at a fixed radius.
+        """Outward-corner negotiation, phase 3: arc around, steering on right.
 
-        Flies a constant-radius clockwise arc (forward velocity plus a
-        matching negative yaw rate, clamped to max_yaw_rate_deg_s like
-        every other yaw command in this module) with radius equal to the
-        wall's target perpendicular standoff (target_wall_distance_m /
-        sqrt(2)), so the path circles the corner apex at the following
-        distance. Continues until front picks up a wall at or inside
+        Flies a clockwise arc (forward velocity plus a negative yaw rate).
+        The base yaw rate is the one that flies a constant radius equal to
+        the wall's target perpendicular standoff (target_wall_distance_m /
+        sqrt(2)), clamped to max_yaw_rate_deg_s like every other yaw
+        command in this module. In a clockwise arc the circle's center is
+        on the drone's right, so each cycle corrects the base from the
+        right reading::
+
+            yaw = base - arc_radius_gain_deg_per_m * (right - radius)
+
+        Right farther than the radius gives a tighter (more negative)
+        turn, closer gives a wider one. The correction is skipped (yaw =
+        base) when right is None, not positive, or above
+        max_arc_right_reading_m. The result is clamped to
+        [-max_yaw_rate_deg_s, base * min_arc_yaw_fraction], so the arc
+        never turns left and never stops turning, which keeps
+        max_corner_arc_deg a real bound.
+
+        Continues until front picks up a wall at or inside
         target_wall_distance_m -- geometrically, that is the point on the
         arc where the drone is back at the 45 deg follow attitude relative
         to the new wall face, so compute_follow_command() can take
@@ -829,27 +880,41 @@ class WallFollower:
                 command.
 
         Returns:
-            True once front reads at or under target_wall_distance_m.
-            False if should_abort()/is_too_close() fires, or if
-            max_corner_arc_deg of accumulated arc is exhausted first. A
-            missing or far front never ends the arc early.
+            True once front reads at or under target_wall_distance_m
+            (logged at INFO with the degrees of arc commanded). False if
+            should_abort()/is_too_close() fires, or if max_corner_arc_deg
+            of accumulated commanded arc is exhausted first (logged as a
+            WARNING with the last front and right readings). A missing or
+            far front never ends the arc early.
         """
         cfg = self._config
         radius = cfg.target_wall_distance_m / _SQRT2
-        yaw_rate_deg_s = -math.degrees(cfg.follow_velocity_m_s / radius)
-        yaw_rate_deg_s = max(-cfg.max_yaw_rate_deg_s, min(cfg.max_yaw_rate_deg_s, yaw_rate_deg_s))
+        base_yaw_deg_s = -math.degrees(cfg.follow_velocity_m_s / radius)
+        base_yaw_deg_s = max(-cfg.max_yaw_rate_deg_s, min(cfg.max_yaw_rate_deg_s, base_yaw_deg_s))
+        weakest_yaw_deg_s = base_yaw_deg_s * cfg.min_arc_yaw_fraction
         logger.info("WallFollower: negotiating outward corner - arcing at radius %.2f m.", radius)
         if self._flight_state is not None:
             self._flight_state.set_direction("forward")
             self._flight_state.set_velocity(cfg.follow_velocity_m_s)
 
         arc_traveled_deg = 0.0
+        last_readings: MultiRangerReadings | None = None
         while arc_traveled_deg < cfg.max_corner_arc_deg:
             readings = self._corner_negotiation_poll(ranger, should_abort)
             if readings is None:
                 return False
+            last_readings = readings
             if readings.front is not None and 0.0 < readings.front <= cfg.target_wall_distance_m:
+                logger.info(
+                    f"WallFollower: corner negotiated after {arc_traveled_deg:.0f} deg of arc "
+                    "- resuming follow."
+                )
                 return True
+
+            yaw_rate_deg_s = base_yaw_deg_s
+            if readings.right is not None and 0.0 < readings.right <= cfg.max_arc_right_reading_m:
+                yaw_rate_deg_s -= cfg.arc_radius_gain_deg_per_m * (readings.right - radius)
+            yaw_rate_deg_s = max(-cfg.max_yaw_rate_deg_s, min(weakest_yaw_deg_s, yaw_rate_deg_s))
 
             if not self._corner_negotiation_move(
                 mc, should_abort, cfg.follow_velocity_m_s, yaw_rate_deg_s
@@ -857,6 +922,13 @@ class WallFollower:
                 return False
             arc_traveled_deg += abs(yaw_rate_deg_s) * _POLL_INTERVAL_S
 
+        last_front = None if last_readings is None else last_readings.front
+        last_right = None if last_readings is None else last_readings.right
+        logger.warning(
+            f"WallFollower: corner arc budget ({cfg.max_corner_arc_deg:.0f} deg) exhausted "
+            f"without reacquiring a wall (front={_format_range(last_front)}, "
+            f"right={_format_range(last_right)}) - stopping."
+        )
         return False
 
     def _negotiate_outer_corner(
@@ -972,6 +1044,7 @@ class WallFollower:
                 spike_cycles = 0
                 negotiated = self._negotiate_outer_corner(mc, ranger, should_abort, previous_right)
                 if not negotiated:
+                    logger.warning("WallFollower: outward corner negotiation failed - stopping.")
                     break
                 # The arc phase was already flying at follow_velocity_m_s,
                 # so the next cycle shouldn't brake as though starting
